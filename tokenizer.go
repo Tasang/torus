@@ -125,6 +125,30 @@ func (t *TorusTokenizer) segmentThai(text string) []string {
 			return nil
 		}
 
+		// Helper to append atoms while handling merge-with-prev for first atom
+		appendAtoms := func(result []string, atoms []string) []string {
+			if len(atoms) == 0 {
+				return result
+			}
+			// Check if first atom needs to merge with previous result
+			if needsMergeWithPrev(atoms[0]) && len(result) > 0 {
+				prev := result[len(result)-1]
+				result = result[:len(result)-1]
+				// Merge ALL atoms with prev (not just the first one)
+				// This ensures that sequences like "ัล" stay together when merged
+				// e.g., "จิต" + ["ั", "ล"] → "จิตัล" → ["จิ", "ตัล"]
+				allAtoms := ""
+				for _, a := range atoms {
+					allAtoms += a
+				}
+				merged := prev + allAtoms
+				// Re-atomize the merged token
+				reAtoms := t.atomicSegmenter.SegmentToTokens(merged)
+				return append(result, reAtoms...)
+			}
+			return append(result, atoms...)
+		}
+
 		// Merge tokens that fail atomic validity, then atomize only merged parts
 		// Valid dict tokens are kept as-is
 		var result []string
@@ -146,20 +170,28 @@ func (t *TorusTokenizer) segmentThai(text string) []string {
 				}
 				// Atomize the merged token (was invalid, needs atomic break)
 				atoms := t.atomicSegmenter.SegmentToTokens(merged)
-				result = append(result, atoms...)
+				result = appendAtoms(result, atoms)
 				continue
 			}
 
 			// Check if token needs to merge with previous (orphan vowel/tone)
 			if needsMergeWithPrev(tok) && len(result) > 0 {
-				// Merge with previous result and re-atomize
+				// Merge with previous result
 				prev := result[len(result)-1]
 				result = result[:len(result)-1]
 				merged := prev + tok
+				i++
+
+				// The merged result might still need to merge with next tokens
+				// e.g., "จิต" + "ั" = "จิตั" still needs "ล" to form "จิตัล"
+				for i < len(dictTokens) && needsMergeWithNext(merged) {
+					merged += dictTokens[i]
+					i++
+				}
+
 				// Atomize the merged token (was invalid, needs atomic break)
 				atoms := t.atomicSegmenter.SegmentToTokens(merged)
-				result = append(result, atoms...)
-				i++
+				result = appendAtoms(result, atoms)
 				continue
 			}
 
@@ -176,6 +208,7 @@ func (t *TorusTokenizer) segmentThai(text string) []string {
 
 // needsMergeWithNext returns true if token ends in a state requiring continuation.
 // e.g., standalone leading vowel (เ แ โ ไ ใ) or ends with leading vowel.
+// Also handles mai han-akat (ั) which requires a final consonant.
 func needsMergeWithNext(tok string) bool {
 	if tok == "" {
 		return false
@@ -198,6 +231,31 @@ func needsMergeWithNext(tok string) bool {
 	lastRune := runes[len(runes)-1]
 	if isThaiLeadingVowel(lastRune) {
 		return true
+	}
+
+	// Check if token has mai han-akat (ั) without a final consonant
+	// Pattern: C + ั + [tone] needs a final consonant
+	// Valid: C + ั + [tone] + C (e.g., นั้น, ชั่น)
+	// Invalid: C + ั + [tone] (e.g., ชั่) - needs merge
+	n := len(runes)
+	for i := 0; i < n; i++ {
+		if runes[i] == 0x0E31 { // mai han-akat (ั)
+			// Check if there's a consonant after mai han-akat (possibly after tone marks)
+			hasFollowingConsonant := false
+			for j := i + 1; j < n; j++ {
+				if isThaiConsonant(runes[j]) {
+					hasFollowingConsonant = true
+					break
+				}
+				// Skip tone marks
+				if !isThaiToneMark(runes[j]) {
+					break
+				}
+			}
+			if !hasFollowingConsonant {
+				return true
+			}
+		}
 	}
 
 	return false

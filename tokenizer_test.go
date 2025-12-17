@@ -773,3 +773,91 @@ func BenchmarkTokenizer_Combined_Long(b *testing.B) {
 		tok.TokenizeToStrings(longThaiText)
 	}
 }
+
+func TestAtomicSegmenter_MaiHanAkatWithTone(t *testing.T) {
+	seg := NewAtomicSegmenter()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "ชั่น - consonant + mai han-akat + tone + final consonant",
+			input:    "ชั่น",
+			expected: []string{"ชั่น"},
+		},
+		{
+			name:     "นั้น - consonant + mai han-akat + tone + final consonant",
+			input:    "นั้น",
+			expected: []string{"นั้น"},
+		},
+		{
+			name:     "จัน - consonant + mai han-akat + final consonant (no tone)",
+			input:    "จัน",
+			expected: []string{"จัน"},
+		},
+		{
+			name:     "นั่ง - consonant + mai han-akat + tone + final consonant",
+			input:    "นั่ง",
+			expected: []string{"นั่ง"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := seg.SegmentToTokens(tt.input)
+			if !reflect.DeepEqual(result, tt.expected) {
+				t.Errorf("SegmentToTokens(%q) = %v, want %v", tt.input, result, tt.expected)
+				// Debug: print runes
+				t.Logf("Input runes: %U", []rune(tt.input))
+			}
+		})
+	}
+}
+
+func TestCombinedMode_MaiHanAkatWithTone(t *testing.T) {
+	tokCombined := New(WithMode(ModeCombined))
+
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "เมชั่น - mai han-akat + tone with final consonant",
+			input:    "เมชั่น",
+			expected: []string{"เม", "ชั่น"},
+		},
+		{
+			name:     "นั้น - mai han-akat + tone with final consonant",
+			input:    "นั้น",
+			expected: []string{"นั้น"},
+		},
+		{
+			name:     "ดิจิตัล - Dict splits mai han-akat separately",
+			input:    "ดิจิตัล",
+			expected: []string{"ดิ", "จิ", "ตัล"},
+		},
+		{
+			name:     "พิธานั้น - Dict splits mai han-akat+tone separately",
+			input:    "พิธานั้น",
+			expected: []string{"พิ", "ธา", "นั้น"},
+		},
+		{
+			name:     "ทรานส์ฟอร์เมชั่น - loanword with ชั่น",
+			input:    "ทรานส์ฟอร์เมชั่น",
+			expected: []string{"ทรานส์", "ฟ", "อร์", "เม", "ชั่น"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tokCombined.TokenizeToStrings(tt.input)
+			if !reflect.DeepEqual(result, tt.expected) {
+				t.Errorf("TokenizeToStrings(%q) = %v, want %v", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
