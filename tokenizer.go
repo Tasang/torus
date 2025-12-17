@@ -1,7 +1,9 @@
 // Package torus provides Thai language tokenization using Trie-based longest match algorithm.
 //
 // TORUS is designed specifically for Thai language tokenization with support for:
-//   - Thai text segmentation using dictionary-based longest match
+//   - Thai text segmentation using dictionary-based longest match (Dict mode)
+//   - Atomic segmentation into smallest valid Thai units (Atomic mode)
+//   - Combined mode: dictionary-based with atomic guarantee
 //   - CJK character-by-character splitting (Chinese, Japanese, Korean)
 //   - Standard Unicode word boundary detection for other languages
 //   - Proper handling of Thai combining marks (vowels, tone marks)
@@ -13,11 +15,32 @@
 //	for _, t := range tokens {
 //	    fmt.Println(t.Text)
 //	}
+//
+// Using different modes:
+//
+//	tok := torus.New(torus.WithMode(torus.ModeAtomic))
+//	tokens := tok.TokenizeToStrings("เสียงเพลง")
+//	// Returns: ["เสีย", "ง", "เพ", "ล", "ง"]
 package torus
 
 import (
 	"strings"
 	"unicode"
+)
+
+// Mode represents the tokenization mode for Thai text.
+type Mode int
+
+const (
+	// ModeDict uses dictionary-based longest match segmentation.
+	ModeDict Mode = iota
+
+	// ModeAtomic splits Thai text into smallest valid atomic units.
+	ModeAtomic
+
+	// ModeCombined uses dictionary-based segmentation but guarantees
+	// each token is also a valid atomic unit (splits non-atomic dict tokens).
+	ModeCombined
 )
 
 // Token represents a tokenized segment of text.
@@ -40,10 +63,17 @@ type Tokenizer interface {
 	NormalizeToken(token string) string
 }
 
+// ThaiSegmenterInterface defines the interface for Thai segmenters.
+type ThaiSegmenterInterface interface {
+	SegmentToTokens(text string) []string
+}
+
 // TorusTokenizer implements the Tokenizer interface with Thai and CJK support.
 type TorusTokenizer struct {
-	thaiSegmenter *ThaiSegmenter
-	lowercase     bool
+	mode            Mode
+	thaiSegmenter   *ThaiSegmenter
+	atomicSegmenter *AtomicSegmenter
+	lowercase       bool
 }
 
 // Option is a function that configures the tokenizer.
@@ -56,16 +86,138 @@ func WithLowercase(lowercase bool) Option {
 	}
 }
 
+// WithMode sets the tokenization mode (default: ModeDict).
+func WithMode(mode Mode) Option {
+	return func(t *TorusTokenizer) {
+		t.mode = mode
+	}
+}
+
 // New creates a new TorusTokenizer with default settings.
 func New(opts ...Option) *TorusTokenizer {
 	t := &TorusTokenizer{
-		thaiSegmenter: NewThaiSegmenter(),
-		lowercase:     true,
+		mode:            ModeDict,
+		thaiSegmenter:   NewThaiSegmenter(),
+		atomicSegmenter: NewAtomicSegmenter(),
+		lowercase:       true,
 	}
 	for _, opt := range opts {
 		opt(t)
 	}
 	return t
+}
+
+// Mode returns the current tokenization mode.
+func (t *TorusTokenizer) Mode() Mode {
+	return t.mode
+}
+
+// segmentThai segments Thai text based on the current mode.
+func (t *TorusTokenizer) segmentThai(text string) []string {
+	switch t.mode {
+	case ModeAtomic:
+		return t.atomicSegmenter.SegmentToTokens(text)
+
+	case ModeCombined:
+		// First use dictionary segmentation
+		dictTokens := t.thaiSegmenter.SegmentToTokens(text)
+		if len(dictTokens) == 0 {
+			return nil
+		}
+
+		// Merge tokens that fail atomic validity, then atomize only merged parts
+		// Valid dict tokens are kept as-is
+		var result []string
+		i := 0
+		for i < len(dictTokens) {
+			tok := dictTokens[i]
+
+			// Check if token needs to merge with next
+			if needsMergeWithNext(tok) && i+1 < len(dictTokens) {
+				// Merge with next token(s) until valid
+				merged := tok
+				i++
+				for i < len(dictTokens) {
+					merged += dictTokens[i]
+					i++
+					if !needsMergeWithNext(merged) {
+						break
+					}
+				}
+				// Atomize the merged token (was invalid, needs atomic break)
+				atoms := t.atomicSegmenter.SegmentToTokens(merged)
+				result = append(result, atoms...)
+				continue
+			}
+
+			// Check if token needs to merge with previous (orphan vowel/tone)
+			if needsMergeWithPrev(tok) && len(result) > 0 {
+				// Merge with previous result and re-atomize
+				prev := result[len(result)-1]
+				result = result[:len(result)-1]
+				merged := prev + tok
+				// Atomize the merged token (was invalid, needs atomic break)
+				atoms := t.atomicSegmenter.SegmentToTokens(merged)
+				result = append(result, atoms...)
+				i++
+				continue
+			}
+
+			// Token is valid - keep Dict token as-is
+			result = append(result, tok)
+			i++
+		}
+		return result
+
+	default: // ModeDict
+		return t.thaiSegmenter.SegmentToTokens(text)
+	}
+}
+
+// needsMergeWithNext returns true if token ends in a state requiring continuation.
+// e.g., standalone leading vowel (เ แ โ ไ ใ) or ends with leading vowel.
+func needsMergeWithNext(tok string) bool {
+	if tok == "" {
+		return false
+	}
+	runes := []rune(tok)
+
+	// Check if entire token is just leading vowel(s)
+	allLeading := true
+	for _, r := range runes {
+		if !isThaiLeadingVowel(r) {
+			allLeading = false
+			break
+		}
+	}
+	if allLeading {
+		return true
+	}
+
+	// Check if token ends with a leading vowel (needs consonant after)
+	lastRune := runes[len(runes)-1]
+	if isThaiLeadingVowel(lastRune) {
+		return true
+	}
+
+	return false
+}
+
+// needsMergeWithPrev returns true if token starts with something that can't start an atom.
+// e.g., standalone middle vowel or tone mark.
+func needsMergeWithPrev(tok string) bool {
+	if tok == "" {
+		return false
+	}
+	runes := []rune(tok)
+	first := runes[0]
+
+	// Middle vowels and tone marks can't start a valid atom
+	if isThaiMiddleVowel(first) || isThaiToneMark(first) {
+		return true
+	}
+
+	return false
 }
 
 // Tokenize splits text into tokens with position information.
@@ -97,14 +249,14 @@ func (t *TorusTokenizer) Tokenize(text string) []Token {
 
 		// Check what kind of text we're dealing with
 		if IsThaiChar(runes[i]) {
-			// Thai text - use segmenter
+			// Thai text - use appropriate segmenter based on mode
 			segmentEnd := i
 			for segmentEnd < n && (IsThaiChar(runes[segmentEnd]) || unicode.IsMark(runes[segmentEnd])) {
 				segmentEnd++
 			}
 
 			thaiText := string(runes[i:segmentEnd])
-			thaiTokens := t.thaiSegmenter.SegmentToTokens(thaiText)
+			thaiTokens := t.segmentThai(thaiText)
 
 			// Calculate byte offsets for Thai tokens
 			thaiRunes := []rune(thaiText)

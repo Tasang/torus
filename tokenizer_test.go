@@ -481,3 +481,295 @@ func BenchmarkTrie_LongestMatch(b *testing.B) {
 		trie.LongestMatch(text)
 	}
 }
+
+// ============================================================
+// Atomic Segmentation Tests
+// ============================================================
+
+func TestAtomicSegmenter_Basic(t *testing.T) {
+	seg := NewAtomicSegmenter()
+
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "example from spec",
+			input:    "เสียงเพลงบทนี้ดูมีความเพราะ",
+			expected: []string{"เสีย", "ง", "เพ", "ล", "ง", "บ", "ท", "นี้", "ดู", "มี", "ค", "วา", "ม", "เพ", "ราะ"},
+		},
+		{
+			name:     "leading vowel with middle vowel and consonant",
+			input:    "เสีย",
+			expected: []string{"เสีย"},
+		},
+		{
+			name:     "leading vowel only",
+			input:    "เพ",
+			expected: []string{"เพ"},
+		},
+		{
+			name:     "consonant with middle vowel",
+			input:    "ดู",
+			expected: []string{"ดู"},
+		},
+		{
+			name:     "consonant with middle vowel and tone",
+			input:    "นี้",
+			expected: []string{"นี้"},
+		},
+		{
+			name:     "single consonant",
+			input:    "ก",
+			expected: []string{"ก"},
+		},
+		{
+			name:     "special atoms",
+			input:    "ฯๆ",
+			expected: []string{"ฯ", "ๆ"},
+		},
+		{
+			name:     "consonant with aa-short vowel",
+			input:    "ราะ",
+			expected: []string{"ราะ"},
+		},
+		{
+			name:     "multiple atoms",
+			input:    "กาบ",
+			expected: []string{"กา", "บ"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := seg.SegmentToTokens(tt.input)
+			if !reflect.DeepEqual(result, tt.expected) {
+				t.Errorf("SegmentToTokens(%q) = %v, want %v", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestTokenizer_ModeAtomic(t *testing.T) {
+	tok := New(WithMode(ModeAtomic))
+
+	tests := []struct {
+		name     string
+		input    string
+		expected []string
+	}{
+		{
+			name:     "atomic thai segmentation",
+			input:    "เสียงเพลง",
+			expected: []string{"เสีย", "ง", "เพ", "ล", "ง"},
+		},
+		{
+			name:     "mixed with english",
+			input:    "hello เสีย world",
+			expected: []string{"hello", "เสีย", "world"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tok.TokenizeToStrings(tt.input)
+			if !reflect.DeepEqual(result, tt.expected) {
+				t.Errorf("TokenizeToStrings(%q) = %v, want %v", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestTokenizer_ModeCombined(t *testing.T) {
+	tok := New(WithMode(ModeCombined))
+	tokDict := New(WithMode(ModeDict))
+
+	// Combined mode keeps valid Dict tokens as-is
+	// Only merges and atomizes when Dict produces invalid tokens
+
+	// Test with valid Dict tokens - should match Dict output
+	result := tok.TokenizeToStrings("โตเกียว")
+	dictResult := tokDict.TokenizeToStrings("โตเกียว")
+
+	if len(result) == 0 {
+		t.Error("Combined mode should produce tokens")
+	}
+
+	// Should match Dict when tokens are valid
+	if !reflect.DeepEqual(result, dictResult) {
+		t.Errorf("Combined should match Dict for valid tokens: got %v, want %v", result, dictResult)
+	}
+
+	// Test with name - should also match Dict
+	result2 := tok.TokenizeToStrings("ประยุทธ์ จันทร์โอชา")
+	dictResult2 := tokDict.TokenizeToStrings("ประยุทธ์ จันทร์โอชา")
+
+	if !reflect.DeepEqual(result2, dictResult2) {
+		t.Errorf("Combined should match Dict: got %v, want %v", result2, dictResult2)
+	}
+}
+
+func TestTokenizer_ModeDefault(t *testing.T) {
+	tok := New()
+
+	if tok.Mode() != ModeDict {
+		t.Errorf("Default mode should be ModeDict, got %v", tok.Mode())
+	}
+}
+
+func TestAtomicSegmenter_LeadingVowels(t *testing.T) {
+	seg := NewAtomicSegmenter()
+
+	// All leading vowels should attach to following consonant
+	leadingVowels := []rune{'เ', 'แ', 'โ', 'ไ', 'ใ'}
+
+	for _, v := range leadingVowels {
+		input := string(v) + "ก" // leading vowel + consonant
+		result := seg.SegmentToTokens(input)
+		if len(result) != 1 {
+			t.Errorf("Leading vowel %c + consonant should be single atom, got %v", v, result)
+		}
+	}
+}
+
+func TestAtomicSegmenter_ToneMarks(t *testing.T) {
+	seg := NewAtomicSegmenter()
+
+	tests := []struct {
+		input    string
+		expected []string
+	}{
+		{"ก่", []string{"ก่"}},   // Mai Ek
+		{"ก้", []string{"ก้"}},   // Mai Tho
+		{"ก๊", []string{"ก๊"}},   // Mai Tri
+		{"ก๋", []string{"ก๋"}},   // Mai Chattawa
+		{"ก์", []string{"ก์"}},   // Karun (silent mark)
+		{"กี่", []string{"กี่"}}, // Middle vowel + tone
+	}
+
+	for _, tt := range tests {
+		result := seg.SegmentToTokens(tt.input)
+		if !reflect.DeepEqual(result, tt.expected) {
+			t.Errorf("SegmentToTokens(%q) = %v, want %v", tt.input, result, tt.expected)
+		}
+	}
+}
+
+func TestAtomicSegmenter_MiddleVowelCombinations(t *testing.T) {
+	seg := NewAtomicSegmenter()
+
+	tests := []struct {
+		input    string
+		expected []string
+	}{
+		{"กะ", []string{"กะ"}},     // Short A
+		{"กา", []string{"กา"}},     // Long A
+		{"กาะ", []string{"กาะ"}},   // Combined vowel (aa + short marker)
+		{"กือ", []string{"กื", "อ"}}, // ื is vowel, อ is consonant (atomically separate)
+		{"กี", []string{"กี"}},     // Long I
+		{"กู", []string{"กู"}},     // Long U
+	}
+
+	for _, tt := range tests {
+		result := seg.SegmentToTokens(tt.input)
+		if !reflect.DeepEqual(result, tt.expected) {
+			t.Errorf("SegmentToTokens(%q) = %v, want %v", tt.input, result, tt.expected)
+		}
+	}
+}
+
+func BenchmarkTokenizer_Atomic(b *testing.B) {
+	tok := New(WithMode(ModeAtomic))
+	text := "เสียงเพลงบทนี้ดูมีความเพราะ"
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tok.TokenizeToStrings(text)
+	}
+}
+
+func BenchmarkTokenizer_Combined(b *testing.B) {
+	tok := New(WithMode(ModeCombined))
+	text := "โตเกียว กรุงเทพ นิวยอร์ก"
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tok.TokenizeToStrings(text)
+	}
+}
+
+// Direct segmenter benchmarks (without tokenizer overhead)
+func BenchmarkSegmenter_Dict(b *testing.B) {
+	seg := NewThaiSegmenter()
+	text := "เสียงเพลงบทนี้ดูมีความเพราะ"
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		seg.SegmentToTokens(text)
+	}
+}
+
+func BenchmarkSegmenter_Atomic(b *testing.B) {
+	seg := NewAtomicSegmenter()
+	text := "เสียงเพลงบทนี้ดูมีความเพราะ"
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		seg.SegmentToTokens(text)
+	}
+}
+
+// Long Thai text for benchmarking (4k+ characters)
+var longThaiText = `กรุงเทพมหานครเป็นเมืองหลวงและนครที่มีประชากรมากที่สุดของประเทศไทย เป็นศูนย์กลางการปกครอง การศึกษา การคมนาคมขนส่ง การเงินการธนาคาร การพาณิชย์ การสื่อสาร และความเจริญของประเทศ เป็นเมืองที่มีชื่อยาวที่สุดในโลก ตั้งอยู่บนสามเหลี่ยมปากแม่น้ำเจ้าพระยา มีแม่น้ำเจ้าพระยาไหลผ่านและแบ่งเมืองออกเป็นสองฝั่ง คือ ฝั่งพระนครและฝั่งธนบุรี กรุงเทพมหานครมีพื้นที่ทั้งหมด 1,568.737 ตารางกิโลเมตร มีประชากรตามทะเบียนราษฎรกว่า 5 ล้านคน แต่ประชากรที่อาศัยอยู่จริงคาดว่ามีสูงถึง 10 ล้านคน ทำให้เป็นเมืองที่มีประชากรหนาแน่นมากเป็นอันดับต้นๆ ของโลก
+ประวัติศาสตร์ของกรุงเทพมหานครเริ่มต้นเมื่อพระบาทสมเด็จพระพุทธยอดฟ้าจุฬาโลกมหาราช ทรงสถาปนาเป็นราชธานีแห่งใหม่ของอาณาจักรสยามเมื่อปี พ.ศ. 2325 หลังจากกรุงธนบุรีเสียแก่พม่า พระองค์ทรงย้ายเมืองหลวงจากฝั่งธนบุรีมายังฝั่งตะวันออกของแม่น้ำเจ้าพระยา และทรงสร้างพระบรมมหาราชวังเป็นที่ประทับ ตลอดจนวัดพระศรีรัตนศาสดารามหรือวัดพระแก้วเป็นวัดประจำพระราชวัง
+ปัจจุบันกรุงเทพมหานครเป็นมหานครระดับโลก เป็นศูนย์กลางทางเศรษฐกิจของภูมิภาคอินโดจีน และเป็นหนึ่งในจุดหมายปลายทางท่องเที่ยวที่ได้รับความนิยมมากที่สุดในโลก มีสถานที่ท่องเที่ยวมากมาย ทั้งวัดวาอาราม พระราชวัง พิพิธภัณฑ์ ห้างสรรพสินค้า ตลาดนัด และแหล่งบันเทิงต่างๆ อาหารไทยก็เป็นที่รู้จักไปทั่วโลก โดยเฉพาะต้มยำกุ้ง ผัดไทย แกงเขียวหวาน และข้าวผัด
+การคมนาคมในกรุงเทพมหานครมีหลากหลายรูปแบบ ทั้งรถยนต์ส่วนตัว รถโดยสารประจำทาง รถไฟฟ้าบีทีเอส รถไฟฟ้าใต้ดิน รถไฟฟ้าแอร์พอร์ตลิงก์ เรือด่วนเจ้าพระยา และแท็กซี่ อย่างไรก็ตาม ปัญหาการจราจรติดขัดยังคงเป็นปัญหาใหญ่ของเมือง โดยเฉพาะในชั่วโมงเร่งด่วน
+กรุงเทพมหานครแบ่งการปกครองออกเป็น 50 เขต และ 180 แขวง มีผู้ว่าราชการกรุงเทพมหานครเป็นผู้บริหารสูงสุด ซึ่งมาจากการเลือกตั้งโดยตรงของประชาชน การศึกษาในกรุงเทพมหานครมีสถาบันการศึกษาทุกระดับ ตั้งแต่ระดับอนุบาลจนถึงระดับอุดมศึกษา มีมหาวิทยาลัยชั้นนำของประเทศหลายแห่ง เช่น จุฬาลงกรณ์มหาวิทยาลัย มหาวิทยาลัยธรรมศาสตร์ มหาวิทยาลัยเกษตรศาสตร์ และมหาวิทยาลัยมหิดล
+สภาพอากาศของกรุงเทพมหานครเป็นแบบร้อนชื้น มีสามฤดู คือ ฤดูร้อน ฤดูฝน และฤดูหนาว อุณหภูมิเฉลี่ยตลอดปีประมาณ 28 องศาเซลเซียส ฤดูร้อนอุณหภูมิอาจสูงถึง 40 องศาเซลเซียส ส่วนฤดูหนาวอุณหภูมิอาจลดลงถึง 15 องศาเซลเซียส ปริมาณน้ำฝนเฉลี่ยประมาณ 1,500 มิลลิเมตรต่อปี
+เศรษฐกิจของกรุงเทพมหานครมีขนาดใหญ่ที่สุดในประเทศ คิดเป็นสัดส่วนประมาณร้อยละ 44 ของผลิตภัณฑ์มวลรวมภายในประเทศ ภาคบริการเป็นภาคเศรษฐกิจที่ใหญ่ที่สุด โดยเฉพาะการท่องเที่ยว การเงินการธนาคาร และการค้าปลีก นอกจากนี้ยังมีภาคอุตสาหกรรมการผลิตที่สำคัญ เช่น อุตสาหกรรมยานยนต์ อิเล็กทรอนิกส์ และอาหาร`
+
+func BenchmarkSegmenter_Dict_Long(b *testing.B) {
+	seg := NewThaiSegmenter()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		seg.SegmentToTokens(longThaiText)
+	}
+}
+
+func BenchmarkSegmenter_Atomic_Long(b *testing.B) {
+	seg := NewAtomicSegmenter()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		seg.SegmentToTokens(longThaiText)
+	}
+}
+
+func BenchmarkTokenizer_Dict_Long(b *testing.B) {
+	tok := New(WithMode(ModeDict))
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tok.TokenizeToStrings(longThaiText)
+	}
+}
+
+func BenchmarkTokenizer_Atomic_Long(b *testing.B) {
+	tok := New(WithMode(ModeAtomic))
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tok.TokenizeToStrings(longThaiText)
+	}
+}
+
+func BenchmarkTokenizer_Combined_Long(b *testing.B) {
+	tok := New(WithMode(ModeCombined))
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tok.TokenizeToStrings(longThaiText)
+	}
+}
