@@ -743,13 +743,47 @@ AtomicSegmenter.Segment(text) -> []string:
 
 ---
 
-## 9. Combined Mode - Dict + Atomic Validation
+## 9. Combined Mode - segmentWithBacktrack
 
-### 9.1 Merge Detection Functions
+Combined mode uses `segmentWithBacktrack` as its primary segmenter. This function
+replaces greedy longest-match with **coverage-aware backtracking**: at each position
+it finds all dictionary matches and selects using two criteria (in priority order):
+
+1. **Boundary validity**: the character after the match must not be a middle vowel
+   (which would indicate the match consumed a consonant belonging to the next syllable).
+   Tone marks are NOT considered invalid — they modify the preceding character and are
+   absorbed as combining marks.
+
+2. **Remainder coverage**: the text after the match (past any absorbed combining marks)
+   should start with a dictionary word. If the longest match leaves uncovered text but
+   a shorter match yields coverage, the shorter match wins.
+
+### 9.1 Examples
+
+**Boundary backtracking** — "นายกันตพล":
+1. `AllMatches` returns `[3, 4]` (for "นาย" and "นายก")
+2. Try "นายก"(4): next char ั is middle vowel → **invalid boundary** → skip
+3. Try "นาย"(3): next char ก is consonant → valid; remainder "กันตพล" has dict match "กัน" → **coverage** → choose
+4. Result: `["นาย", "กัน", "ต", "พล"]`
+
+**Coverage backtracking** — "นายกฤษฎา":
+1. `AllMatches` returns `[3, 4]` (for "นาย" and "นายก")
+2. Try "นายก"(4): next char ฤ is consonant → valid boundary; remainder "ฤษฎา" has NO dict match → no coverage → save as fallback
+3. Try "นาย"(3): next char ก is consonant → valid; remainder "กฤษฎา" has dict match → **coverage** → choose
+4. Result: `["นาย", "กฤษฎา"]`
+
+**Combining mark absorption** — "อร์เม...":
+1. `AllMatches` returns `[2]` for "อร"
+2. Try "อร"(2): next char ์ is tone mark → valid boundary (tone marks are NOT rejected)
+3. After match, absorb trailing combining marks: "อร" + "์" → "อร์"
+4. Continue from เ...
+
+### 9.2 Helper Functions
 
 #### needsMergeWithNext
 
 Returns `true` if a token is incomplete and needs to absorb following tokens.
+Used in Step 3 (forward merge) of `segmentWithBacktrack`.
 
 ```
 needsMergeWithNext(tok) -> bool:
@@ -792,98 +826,28 @@ Returns `true` if a token starts with something that can't begin an atom.
 ```
 needsMergeWithPrev(tok) -> bool:
     if tok is empty: return false
-    runes = toCodepoints(tok)
-    first = runes[0]
+    first = toCodepoints(tok)[0]
 
     if isThaiMiddleVowel(first) OR isThaiToneMark(first):
         return true
-
     return false
 ```
 
-### 9.2 Combined Mode Algorithm
+### 9.3 segmentWithBacktrack Algorithm
 
 ```
-segmentThai_Combined(text) -> []string:
-    // Phase 1: Dictionary segmentation
-    dictTokens = thaiSegmenter.SegmentToTokens(text)
-    if dictTokens is empty: return null
-
-    // Phase 2: Validate and fix
-    result = []
-    i = 0
-
-    while i < len(dictTokens):
-        tok = dictTokens[i]
-
-        // Case A: Token needs forward merging
-        if needsMergeWithNext(tok) AND i + 1 < len(dictTokens):
-            merged = tok
-            i++
-            while i < len(dictTokens):
-                merged += dictTokens[i]
-                i++
-                if NOT needsMergeWithNext(merged):
-                    break
-            // Re-segment merged result with dict backtracking
-            reTokens = resegmentMerged(merged)
-            result = appendTokens(result, reTokens)
-            continue
-
-        // Case B: Token needs backward merging (orphan vowel/tone)
-        if needsMergeWithPrev(tok) AND len(result) > 0:
-            prev = result[last]
-            result = result[:last]  // Remove previous
-            merged = prev + tok
-            i++
-
-            // The merged result might still need forward merging
-            while i < len(dictTokens) AND needsMergeWithNext(merged):
-                merged += dictTokens[i]
-                i++
-
-            // Re-segment merged result with dict backtracking
-            reTokens = resegmentMerged(merged)
-            result = appendTokens(result, reTokens)
-            continue
-
-        // Case C: Token is valid - keep as-is
-        result.append(tok)
-        i++
-
-    return result
-```
-
-### 9.3 resegmentMerged - Dict Backtracking Re-segmentation
-
-When Combined mode detects invalid token boundaries and merges tokens, the merged
-text must be re-segmented. Instead of falling directly to atomic segmentation (which
-loses dictionary knowledge), `resegmentMerged` first tries dictionary matching with
-**boundary-aware backtracking**: if the longest dictionary match creates an invalid
-boundary (next character is an orphan vowel/tone), it tries progressively shorter
-dictionary matches until a valid boundary is found.
-
-**Example**: For merged text "นายกัน":
-1. `AllMatches` returns `[3, 4]` (for "นาย" and "นายก")
-2. Try length 4 ("นายก"): next char is ั (middle vowel) — **invalid boundary**
-3. Try length 3 ("นาย"): next char is ก (consonant) — **valid boundary**
-4. Take "นาย", continue with "กัน" → dictionary match → take "กัน"
-5. Result: `["นาย", "กัน"]`
-
-```
-resegmentMerged(text) -> []string:
+segmentWithBacktrack(text) -> []string:
     runes = toCodepoints(text)
     n = len(runes)
     if n == 0: return null
 
-    // Step 1: Dict segmentation with boundary-aware backtracking
+    // ── Step 1: Dict with coverage-aware backtracking ──
     rawSegments = []
     i = 0
 
     while i < n:
         if isWhitespace(runes[i]):
-            i++
-            continue
+            i++; continue
 
         if NOT IsThaiChar(runes[i]):
             start = i
@@ -892,35 +856,58 @@ resegmentMerged(text) -> []string:
             rawSegments.append(string(runes[start:i]))
             continue
 
-        // Try dict matches with boundary validation (backtracking)
         matches = trie.AllMatches(runes[i:])
 
         chosen = 0
-        // Try from longest to shortest, pick first with valid boundary
+        fallback = 0    // valid boundary but no remainder coverage
+
         for j = len(matches) - 1; j >= 0; j--:
             mLen = matches[j]
             end = i + mLen
+
             if end >= n:
-                chosen = mLen
-                break
-            // Valid boundary: next char can start a new token
-            nextChar = runes[end]
-            if NOT isThaiMiddleVowel(nextChar) AND NOT isThaiToneMark(nextChar):
-                chosen = mLen
-                break
+                chosen = mLen; break
+
+            // Check 1: boundary validity
+            // Only middle vowels invalidate — tone marks are absorbed later
+            if isThaiMiddleVowel(runes[end]):
+                continue
+
+            // Skip past combining marks to find the true remainder start
+            effectiveEnd = end
+            while effectiveEnd < n AND IsThaiCombiningMark(runes[effectiveEnd]):
+                effectiveEnd++
+
+            if effectiveEnd >= n:
+                chosen = mLen; break
+
+            // Check 2: remainder coverage
+            remainderMatches = trie.AllMatches(runes[effectiveEnd:])
+            if len(remainderMatches) > 0:
+                chosen = mLen; break          // best: valid + coverage
+
+            if fallback == 0:
+                fallback = mLen               // save first valid-boundary match
+
+        if chosen == 0:
+            chosen = fallback
 
         if chosen > 0:
-            rawSegments.append(string(runes[i : i+chosen]))
-            i += chosen
+            // Absorb trailing combining marks (tone marks, etc.)
+            end = i + chosen
+            while end < n AND IsThaiCombiningMark(runes[end]):
+                end++
+            rawSegments.append(string(runes[i:end]))
+            i = end
         else:
-            // No valid dict match - take single char + combining marks
+            // No dict match — single char + combining marks
             clusterEnd = i + 1
             while clusterEnd < n AND IsThaiCombiningMark(runes[clusterEnd]):
                 clusterEnd++
             rawSegments.append(string(runes[i:clusterEnd]))
             i = clusterEnd
 
-    // Step 2: Orphan merging - merge tokens that can't start independently
+    // ── Step 2: Orphan merging ──
     tokens = []
     for each seg in rawSegments:
         if seg is empty: continue
@@ -930,8 +917,7 @@ resegmentMerged(text) -> []string:
             continue
         tokens.append(seg)
 
-    // Step 3: Forward merge for incomplete tokens (mai han-akat, leading vowels),
-    // atomize merged portions as final fallback
+    // ── Step 3: Forward merge + atomic fallback ──
     result = []
     j = 0
     while j < len(tokens):
@@ -942,8 +928,7 @@ resegmentMerged(text) -> []string:
             while j < len(tokens):
                 merged += tokens[j]
                 j++
-                if NOT needsMergeWithNext(merged):
-                    break
+                if NOT needsMergeWithNext(merged): break
             atoms = atomicSegmenter.SegmentToTokens(merged)
             result = result + atoms
             continue
@@ -953,31 +938,14 @@ resegmentMerged(text) -> []string:
     return result
 ```
 
-### 9.4 appendTokens Helper
-
-Handles the case where re-segmented results produce tokens that need merging with previously emitted results.
+### 9.4 segmentThai dispatch (Combined mode)
 
 ```
-appendTokens(result, tokens) -> []string:
-    if tokens is empty: return result
-
-    // If first token needs merge with previous result
-    if needsMergeWithPrev(tokens[0]) AND len(result) > 0:
-        prev = result[last]
-        result = result[:last]  // Remove previous
-
-        // Merge ALL tokens with prev (not just first)
-        // This ensures sequences like "ัล" stay together
-        allTokens = ""
-        for each tok in tokens:
-            allTokens += tok
-        merged = prev + allTokens
-
-        // Re-segment with dict backtracking
-        reTokens = resegmentMerged(merged)
-        return result + reTokens
-
-    return result + tokens
+segmentThai(text) -> []string:
+    switch mode:
+        case ModeCombined:
+            return segmentWithBacktrack(text)
+        ...
 ```
 
 ---
@@ -1364,11 +1332,15 @@ All five leading vowels followed by consonant ก must produce single atom:
 | `"พิธานั้น"` | `["พิ", "ธา", "นั้น"]` |
 | `"ทรานส์ฟอร์เมชั่น"` | `["ทรานส์", "ฟ", "อร์", "เม", "ชั่น"]` |
 | `"นายกันตพล"` | `["นาย", "กัน", "ต", "พล"]` |
+| `"นายกฤษฎา"` | `["นาย", "กฤษฎา"]` |
 
-**Dict backtracking example**: For `"นายกันตพล"`, Dict greedily matches `นายก` (4 chars)
-which leaves orphan `ั`. Combined mode merges `นายก` + `ัน` = `นายกัน`, then
-`resegmentMerged` backtracks from `นายก` (invalid boundary) to `นาย` (valid boundary),
-producing `["นาย", "กัน"]` instead of the atomic result `["นา", "ย", "กัน"]`.
+**Boundary backtracking**: `"นายกันตพล"` — `นายก`(4) is longest match but next char
+`ั` is a middle vowel (invalid boundary). Backtracks to `นาย`(3), remainder `กัน` has
+dict coverage.
+
+**Coverage backtracking**: `"นายกฤษฎา"` — `นายก`(4) has valid boundary (next char `ฤ`
+is consonant) but remainder `ฤษฎา` has NO dict coverage. Backtracks to `นาย`(3),
+remainder `กฤษฎา` IS a dict word.
 
 ### 13.13 Combined Mode Must Match Dict for Valid Tokens
 
@@ -1437,12 +1409,15 @@ Use this checklist to verify your implementation is complete:
 - [ ] Non-Thai sequence collection within FSA loop
 
 ### Combined Mode
+- [ ] `segmentWithBacktrack()` - the primary Combined mode segmenter:
+  - [ ] Step 1: Dict matching with boundary validity + coverage-aware backtracking
+  - [ ] Boundary check: only middle vowels invalidate (NOT tone marks)
+  - [ ] Coverage check: remainder (past combining marks) must start with dict word
+  - [ ] Combining mark absorption after match selection
+  - [ ] Step 2: Orphan merging (middle vowels/tones that can't start tokens)
+  - [ ] Step 3: Forward merge (needsMergeWithNext) + atomic fallback
 - [ ] `needsMergeWithNext()` - leading vowel check, mai han-akat check
 - [ ] `needsMergeWithPrev()` - middle vowel/tone start check
-- [ ] `resegmentMerged()` - dict backtracking with AllMatches, orphan merge, forward merge
-- [ ] Forward merging loop
-- [ ] Backward merging with continued forward merging
-- [ ] `appendTokens()` helper with re-segmentation
 
 ### Main Tokenizer
 - [ ] `Tokenize()` with byte offset calculation
@@ -1469,7 +1444,7 @@ Use this checklist to verify your implementation is complete:
 - [ ] Middle vowel combinations (6 cases)
 - [ ] Mai Han-Akat (4 cases)
 - [ ] Atomic via tokenizer (2 cases)
-- [ ] Combined mode (6 cases)
+- [ ] Combined mode (7 cases)
 - [ ] Combined matches Dict (2 cases)
 - [ ] Default mode (1 case)
 - [ ] Character classification (10+ cases)

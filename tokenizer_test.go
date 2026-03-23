@@ -880,6 +880,11 @@ func TestCombinedMode_MaiHanAkatWithTone(t *testing.T) {
 			input:    "นายกันตพล",
 			expected: []string{"นาย", "กัน", "ต", "พล"},
 		},
+		{
+			name:     "นายกฤษฎา - coverage backtrack: นาย+กฤษฎา over นายก+ฤษฎา",
+			input:    "นายกฤษฎา",
+			expected: []string{"นาย", "กฤษฎา"},
+		},
 	}
 
 	for _, tt := range tests {

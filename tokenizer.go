@@ -119,87 +119,11 @@ func (t *TorusTokenizer) segmentThai(text string) []string {
 		return t.atomicSegmenter.SegmentToTokens(text)
 
 	case ModeCombined:
-		// First use dictionary segmentation
-		dictTokens := t.thaiSegmenter.SegmentToTokens(text)
-		if len(dictTokens) == 0 {
-			return nil
-		}
-
-		// Helper to append tokens while handling merge-with-prev for first token
-		appendTokens := func(result []string, tokens []string) []string {
-			if len(tokens) == 0 {
-				return result
-			}
-			// Check if first token needs to merge with previous result
-			if needsMergeWithPrev(tokens[0]) && len(result) > 0 {
-				prev := result[len(result)-1]
-				result = result[:len(result)-1]
-				// Merge ALL tokens with prev (not just the first one)
-				// This ensures that sequences like "ัล" stay together when merged
-				// e.g., "จิต" + ["ั", "ล"] → "จิตัล" → ["จิ", "ตัล"]
-				allTokens := ""
-				for _, tok := range tokens {
-					allTokens += tok
-				}
-				merged := prev + allTokens
-				// Re-segment with dict backtracking
-				reTokens := t.resegmentMerged(merged)
-				return append(result, reTokens...)
-			}
-			return append(result, tokens...)
-		}
-
-		// Merge tokens that fail atomic validity, then atomize only merged parts
-		// Valid dict tokens are kept as-is
-		var result []string
-		i := 0
-		for i < len(dictTokens) {
-			tok := dictTokens[i]
-
-			// Check if token needs to merge with next
-			if needsMergeWithNext(tok) && i+1 < len(dictTokens) {
-				// Merge with next token(s) until valid
-				merged := tok
-				i++
-				for i < len(dictTokens) {
-					merged += dictTokens[i]
-					i++
-					if !needsMergeWithNext(merged) {
-						break
-					}
-				}
-				// Re-segment with dict backtracking (was invalid, needs re-segmentation)
-				reTokens := t.resegmentMerged(merged)
-				result = appendTokens(result, reTokens)
-				continue
-			}
-
-			// Check if token needs to merge with previous (orphan vowel/tone)
-			if needsMergeWithPrev(tok) && len(result) > 0 {
-				// Merge with previous result
-				prev := result[len(result)-1]
-				result = result[:len(result)-1]
-				merged := prev + tok
-				i++
-
-				// The merged result might still need to merge with next tokens
-				// e.g., "จิต" + "ั" = "จิตั" still needs "ล" to form "จิตัล"
-				for i < len(dictTokens) && needsMergeWithNext(merged) {
-					merged += dictTokens[i]
-					i++
-				}
-
-				// Re-segment with dict backtracking (was invalid, needs re-segmentation)
-				reTokens := t.resegmentMerged(merged)
-				result = appendTokens(result, reTokens)
-				continue
-			}
-
-			// Token is valid - keep Dict token as-is
-			result = append(result, tok)
-			i++
-		}
-		return result
+		// Use dictionary segmentation with coverage-aware backtracking.
+		// This handles all merge cases (orphan vowels, mai han-akat, leading vowels)
+		// and also backtracks greedy matches when a shorter match yields better
+		// dictionary coverage of the remainder.
+		return t.segmentWithBacktrack(text)
 
 	default: // ModeDict
 		return t.thaiSegmenter.SegmentToTokens(text)
@@ -278,18 +202,30 @@ func needsMergeWithPrev(tok string) bool {
 	return false
 }
 
-// resegmentMerged re-segments merged text using dictionary with boundary-aware
-// backtracking, falling back to atomic segmentation for non-dictionary portions.
-// This is used by Combined mode to re-process merged tokens that were invalid,
-// avoiding the loss of dictionary knowledge that pure atomic segmentation causes.
-func (t *TorusTokenizer) resegmentMerged(text string) []string {
+// segmentWithBacktrack segments Thai text using dictionary with coverage-aware
+// backtracking. It is the primary segmenter for Combined mode.
+//
+// At each position it finds all dictionary matches and selects using two criteria
+// (in priority order):
+//  1. Boundary validity: the character after the match must not be an orphan
+//     vowel or tone mark.
+//  2. Remainder coverage: the text after the match should start with a
+//     dictionary word (i.e., no single-char fallback gap).
+//
+// If the longest match fails criterion 2, shorter matches are tried. This solves
+// greedy ambiguity: e.g., "นายกฤษฎา" picks "นาย"(3) over "นายก"(4) because
+// the remainder "กฤษฎา" has dict coverage while "ฤษฎา" does not.
+//
+// After dict matching, orphan merging and forward merging (with atomic fallback)
+// handle any remaining edge cases.
+func (t *TorusTokenizer) segmentWithBacktrack(text string) []string {
 	runes := []rune(text)
 	n := len(runes)
 	if n == 0 {
 		return nil
 	}
 
-	// Step 1: Dict segmentation with boundary-aware backtracking
+	// Step 1: Dict segmentation with coverage-aware backtracking
 	var rawSegments []string
 	i := 0
 
@@ -308,11 +244,13 @@ func (t *TorusTokenizer) resegmentMerged(text string) []string {
 			continue
 		}
 
-		// Try dict matches with boundary validation (backtracking)
+		// Try dict matches with boundary + coverage validation
 		matches := t.thaiSegmenter.trie.AllMatches(runes[i:])
 
 		chosen := 0
-		// Try from longest to shortest, pick first with valid boundary
+		fallback := 0 // valid boundary but no dict coverage on remainder
+
+		// Try from longest to shortest
 		for j := len(matches) - 1; j >= 0; j-- {
 			mLen := matches[j]
 			end := i + mLen
@@ -320,18 +258,55 @@ func (t *TorusTokenizer) resegmentMerged(text string) []string {
 				chosen = mLen
 				break
 			}
-			// Valid boundary: next char can start a new token
-			// (not a middle vowel or tone mark)
-			nextChar := runes[end]
-			if !isThaiMiddleVowel(nextChar) && !isThaiToneMark(nextChar) {
+
+			// Check 1: boundary validity
+			// Middle vowels (ะ า ิ ี ึ ื ุ ู ั ำ etc.) after a match indicate
+			// the match consumed a consonant that belongs to the next syllable.
+			// Tone marks (็ ่ ้ ๊ ๋ ์) modify the preceding character and will
+			// be absorbed as combining marks — they don't invalidate the boundary.
+			if isThaiMiddleVowel(runes[end]) {
+				continue // invalid boundary, try shorter
+			}
+
+			// Skip past any trailing combining marks (tones, etc.) that will
+			// be absorbed into this match, to check the true remainder.
+			effectiveEnd := end
+			for effectiveEnd < n && IsThaiCombiningMark(runes[effectiveEnd]) {
+				effectiveEnd++
+			}
+
+			if effectiveEnd >= n {
 				chosen = mLen
 				break
 			}
+
+			// Check 2: does remainder (after combining marks) start with a dict word?
+			remainderMatches := t.thaiSegmenter.trie.AllMatches(runes[effectiveEnd:])
+			if len(remainderMatches) > 0 {
+				chosen = mLen // best: valid boundary + remainder coverage
+				break
+			}
+
+			// Valid boundary but no remainder coverage — save as fallback
+			if fallback == 0 {
+				fallback = mLen
+			}
+		}
+
+		if chosen == 0 {
+			chosen = fallback // use valid-boundary-only match
 		}
 
 		if chosen > 0 {
-			rawSegments = append(rawSegments, string(runes[i:i+chosen]))
-			i += chosen
+			// Extend match to absorb any trailing combining marks (tone marks,
+			// following vowels) that can't start their own token. This mirrors
+			// Dict mode's orphan merging — e.g., "อร" + "์" → "อร์".
+			end := i + chosen
+			for end < n && IsThaiCombiningMark(runes[end]) {
+				end++
+			}
+			rawSegments = append(rawSegments, string(runes[i:end]))
+			i = end
 		} else {
 			// No valid dict match - take single char + combining marks
 			clusterEnd := i + 1
