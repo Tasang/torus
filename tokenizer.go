@@ -125,28 +125,28 @@ func (t *TorusTokenizer) segmentThai(text string) []string {
 			return nil
 		}
 
-		// Helper to append atoms while handling merge-with-prev for first atom
-		appendAtoms := func(result []string, atoms []string) []string {
-			if len(atoms) == 0 {
+		// Helper to append tokens while handling merge-with-prev for first token
+		appendTokens := func(result []string, tokens []string) []string {
+			if len(tokens) == 0 {
 				return result
 			}
-			// Check if first atom needs to merge with previous result
-			if needsMergeWithPrev(atoms[0]) && len(result) > 0 {
+			// Check if first token needs to merge with previous result
+			if needsMergeWithPrev(tokens[0]) && len(result) > 0 {
 				prev := result[len(result)-1]
 				result = result[:len(result)-1]
-				// Merge ALL atoms with prev (not just the first one)
+				// Merge ALL tokens with prev (not just the first one)
 				// This ensures that sequences like "ัล" stay together when merged
 				// e.g., "จิต" + ["ั", "ล"] → "จิตัล" → ["จิ", "ตัล"]
-				allAtoms := ""
-				for _, a := range atoms {
-					allAtoms += a
+				allTokens := ""
+				for _, tok := range tokens {
+					allTokens += tok
 				}
-				merged := prev + allAtoms
-				// Re-atomize the merged token
-				reAtoms := t.atomicSegmenter.SegmentToTokens(merged)
-				return append(result, reAtoms...)
+				merged := prev + allTokens
+				// Re-segment with dict backtracking
+				reTokens := t.resegmentMerged(merged)
+				return append(result, reTokens...)
 			}
-			return append(result, atoms...)
+			return append(result, tokens...)
 		}
 
 		// Merge tokens that fail atomic validity, then atomize only merged parts
@@ -168,9 +168,9 @@ func (t *TorusTokenizer) segmentThai(text string) []string {
 						break
 					}
 				}
-				// Atomize the merged token (was invalid, needs atomic break)
-				atoms := t.atomicSegmenter.SegmentToTokens(merged)
-				result = appendAtoms(result, atoms)
+				// Re-segment with dict backtracking (was invalid, needs re-segmentation)
+				reTokens := t.resegmentMerged(merged)
+				result = appendTokens(result, reTokens)
 				continue
 			}
 
@@ -189,9 +189,9 @@ func (t *TorusTokenizer) segmentThai(text string) []string {
 					i++
 				}
 
-				// Atomize the merged token (was invalid, needs atomic break)
-				atoms := t.atomicSegmenter.SegmentToTokens(merged)
-				result = appendAtoms(result, atoms)
+				// Re-segment with dict backtracking (was invalid, needs re-segmentation)
+				reTokens := t.resegmentMerged(merged)
+				result = appendTokens(result, reTokens)
 				continue
 			}
 
@@ -276,6 +276,112 @@ func needsMergeWithPrev(tok string) bool {
 	}
 
 	return false
+}
+
+// resegmentMerged re-segments merged text using dictionary with boundary-aware
+// backtracking, falling back to atomic segmentation for non-dictionary portions.
+// This is used by Combined mode to re-process merged tokens that were invalid,
+// avoiding the loss of dictionary knowledge that pure atomic segmentation causes.
+func (t *TorusTokenizer) resegmentMerged(text string) []string {
+	runes := []rune(text)
+	n := len(runes)
+	if n == 0 {
+		return nil
+	}
+
+	// Step 1: Dict segmentation with boundary-aware backtracking
+	var rawSegments []string
+	i := 0
+
+	for i < n {
+		if unicode.IsSpace(runes[i]) {
+			i++
+			continue
+		}
+
+		if !IsThaiChar(runes[i]) {
+			start := i
+			for i < n && !IsThaiChar(runes[i]) && !unicode.IsSpace(runes[i]) {
+				i++
+			}
+			rawSegments = append(rawSegments, string(runes[start:i]))
+			continue
+		}
+
+		// Try dict matches with boundary validation (backtracking)
+		matches := t.thaiSegmenter.trie.AllMatches(runes[i:])
+
+		chosen := 0
+		// Try from longest to shortest, pick first with valid boundary
+		for j := len(matches) - 1; j >= 0; j-- {
+			mLen := matches[j]
+			end := i + mLen
+			if end >= n {
+				chosen = mLen
+				break
+			}
+			// Valid boundary: next char can start a new token
+			// (not a middle vowel or tone mark)
+			nextChar := runes[end]
+			if !isThaiMiddleVowel(nextChar) && !isThaiToneMark(nextChar) {
+				chosen = mLen
+				break
+			}
+		}
+
+		if chosen > 0 {
+			rawSegments = append(rawSegments, string(runes[i:i+chosen]))
+			i += chosen
+		} else {
+			// No valid dict match - take single char + combining marks
+			clusterEnd := i + 1
+			for clusterEnd < n && IsThaiCombiningMark(runes[clusterEnd]) {
+				clusterEnd++
+			}
+			rawSegments = append(rawSegments, string(runes[i:clusterEnd]))
+			i = clusterEnd
+		}
+	}
+
+	// Step 2: Orphan merging - merge tokens that can't start independently
+	var tokens []string
+	for _, seg := range rawSegments {
+		if seg == "" {
+			continue
+		}
+		rs := []rune(seg)
+		if len(rs) > 0 && (isThaiMiddleVowel(rs[0]) || isThaiToneMark(rs[0])) && len(tokens) > 0 {
+			tokens[len(tokens)-1] += seg
+			continue
+		}
+		tokens = append(tokens, seg)
+	}
+
+	// Step 3: Forward merge for incomplete tokens (mai han-akat, leading vowels),
+	// atomize merged portions as final fallback
+	var result []string
+	j := 0
+	for j < len(tokens) {
+		tok := tokens[j]
+		if needsMergeWithNext(tok) && j+1 < len(tokens) {
+			merged := tok
+			j++
+			for j < len(tokens) {
+				merged += tokens[j]
+				j++
+				if !needsMergeWithNext(merged) {
+					break
+				}
+			}
+			atoms := t.atomicSegmenter.SegmentToTokens(merged)
+			result = append(result, atoms...)
+			continue
+		}
+		result = append(result, tok)
+		j++
+	}
+
+	return result
 }
 
 // Tokenize splits text into tokens with position information.

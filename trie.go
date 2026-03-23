@@ -100,6 +100,30 @@ func (t *Trie) LongestMatch(runes []rune) int {
 	return longestMatch
 }
 
+// AllMatches returns all dictionary word lengths matching from the start of runes,
+// in ascending order. For example, if "go" and "golang" are both in the trie,
+// AllMatches([]rune("golang")) returns [2, 6].
+func (t *Trie) AllMatches(runes []rune) []int {
+	var matches []int
+	node := t.root
+
+	for i, r := range runes {
+		if node.children == nil {
+			break
+		}
+		next, exists := node.children[r]
+		if !exists {
+			break
+		}
+		node = next
+		if node.isEnd {
+			matches = append(matches, i+1)
+		}
+	}
+
+	return matches
+}
+
 // MaxWordLength returns the maximum word length in the Trie.
 func (t *Trie) MaxWordLength() int {
 	return t.maxLen

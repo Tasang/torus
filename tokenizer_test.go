@@ -335,6 +335,32 @@ func TestTrie_LongestMatch(t *testing.T) {
 	}
 }
 
+func TestTrie_AllMatches(t *testing.T) {
+	trie := NewTrie()
+
+	trie.Insert("go")
+	trie.Insert("golang")
+	trie.Insert("gopher")
+
+	tests := []struct {
+		input    string
+		expected []int
+	}{
+		{"golang is great", []int{2, 6}}, // "go" and "golang"
+		{"go home", []int{2}},             // "go" only
+		{"gopher mask", []int{2, 6}},      // "go" and "gopher"
+		{"python", nil},                   // no match
+	}
+
+	for _, tt := range tests {
+		runes := []rune(tt.input)
+		result := trie.AllMatches(runes)
+		if !reflect.DeepEqual(result, tt.expected) {
+			t.Errorf("AllMatches(%q) = %v, want %v", tt.input, result, tt.expected)
+		}
+	}
+}
+
 func TestThaiSegmenter_Basic(t *testing.T) {
 	seg := NewThaiSegmenter()
 
@@ -848,6 +874,11 @@ func TestCombinedMode_MaiHanAkatWithTone(t *testing.T) {
 			name:     "ทรานส์ฟอร์เมชั่น - loanword with ชั่น",
 			input:    "ทรานส์ฟอร์เมชั่น",
 			expected: []string{"ทรานส์", "ฟ", "อร์", "เม", "ชั่น"},
+		},
+		{
+			name:     "นายกันตพล - backtrack from นายก to นาย for valid boundary",
+			input:    "นายกันตพล",
+			expected: []string{"นาย", "กัน", "ต", "พล"},
 		},
 	}
 
