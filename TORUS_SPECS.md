@@ -16,12 +16,13 @@
 6. [Dictionary](#6-dictionary)
 7. [Dict Mode - Longest Match Segmentation](#7-dict-mode---longest-match-segmentation)
 8. [Atomic Mode - FSA Segmentation](#8-atomic-mode---fsa-segmentation)
-9. [Combined Mode - Dict + Atomic Validation](#9-combined-mode---dict--atomic-validation)
+9. [Combined Mode - segmentWithBacktrack](#9-combined-mode---segmentwithbacktrack)
 10. [Main Tokenizer](#10-main-tokenizer)
 11. [CJK and Multilingual Support](#11-cjk-and-multilingual-support)
 12. [Parallel Processing](#12-parallel-processing)
 13. [Test Vectors](#13-test-vectors)
 14. [Implementation Checklist](#14-implementation-checklist)
+15. [Language-Specific Implementation Notes](#15-language-specific-implementation-notes)
 
 ---
 
@@ -84,7 +85,7 @@ Token {
 
 ```
 TrieNode {
-    children: Map<char, TrieNode>  // Child nodes keyed by character (rune/codepoint)
+    children: Map<codepoint, TrieNode>  // Child nodes keyed by Unicode codepoint
     isEnd:    bool                 // True if this node marks the end of a complete word
 }
 ```
@@ -188,7 +189,7 @@ IsThaiCombiningMark(r) -> bool:
 
 ### 4.2 Character Classes for Atomic FSA
 
-Enum `charClass` (uint8):
+Enum `charClass` (small integer, 0-5):
 
 | Value | Name | Description | Codepoints |
 |-------|------|-------------|------------|
@@ -355,12 +356,12 @@ classifyThai(r) -> charClass:
 Trie.Insert(word):
     if word is empty: return
 
-    runes = toCodepoints(word)
-    if len(runes) > this.maxLen:
-        this.maxLen = len(runes)
+    chars = toChars(word)
+    if len(chars) > this.maxLen:
+        this.maxLen = len(chars)
 
     node = this.root
-    for each r in runes:
+    for each r in chars:
         if r not in node.children:
             node.children[r] = new TrieNode(children={}, isEnd=false)
         node = node.children[r]
@@ -394,13 +395,13 @@ Trie.HasPrefix(prefix) -> bool:
 #### LongestMatch
 
 ```
-Trie.LongestMatch(runes) -> int:
+Trie.LongestMatch(chars) -> int:
     node = this.root
     longestMatch = 0
 
-    for i = 0; i < len(runes); i++:
+    for i = 0; i < len(chars); i++:
         if node.children is empty: break
-        r = runes[i]
+        r = chars[i]
         if r not in node.children: break
         node = node.children[r]
         if node.isEnd:
@@ -411,17 +412,17 @@ Trie.LongestMatch(runes) -> int:
 
 #### AllMatches
 
-Returns all dictionary word lengths matching from the start of runes, in ascending order.
+Returns all dictionary word lengths matching from the start of chars, in ascending order.
 Used by Combined mode for boundary-aware backtracking.
 
 ```
-Trie.AllMatches(runes) -> []int:
+Trie.AllMatches(chars) -> []int:
     matches = []
     node = this.root
 
-    for i = 0; i < len(runes); i++:
+    for i = 0; i < len(chars); i++:
         if node.children is empty: break
-        r = runes[i]
+        r = chars[i]
         if r not in node.children: break
         node = node.children[r]
         if node.isEnd:
@@ -449,7 +450,7 @@ Plain text file `words_th.txt`:
 
 ```
 ThaiSegmenter.loadDictionary():
-    // Open and read words_th.txt (embedded or from filesystem)
+    // Open and read words_th.txt (bundled with the library or loaded from filesystem)
     for each line in file:
         word = trim(line)
         if word is not empty:
@@ -477,8 +478,8 @@ If the main dictionary file cannot be loaded, use these 20 common Thai words:
 
 ```
 ThaiSegmenter.Segment(text) -> []string:
-    runes = toCodepoints(text)
-    n = len(runes)
+    chars = toChars(text)
+    n = len(chars)
     if n == 0: return null
 
     segments = []
@@ -486,31 +487,31 @@ ThaiSegmenter.Segment(text) -> []string:
 
     while i < n:
         // Skip whitespace
-        if isWhitespace(runes[i]):
+        if isWhitespace(chars[i]):
             i++
             continue
 
         // Non-Thai: collect sequence
-        if NOT IsThaiChar(runes[i]):
+        if NOT IsThaiChar(chars[i]):
             start = i
-            while i < n AND NOT IsThaiChar(runes[i]) AND NOT isWhitespace(runes[i]):
+            while i < n AND NOT IsThaiChar(chars[i]) AND NOT isWhitespace(chars[i]):
                 i++
-            segments.append(string(runes[start:i]))
+            segments.append(string(chars[start:i]))
             continue
 
         // Thai: try longest match
-        matchLen = this.trie.LongestMatch(runes[i:])
+        matchLen = this.trie.LongestMatch(chars[i:])
 
         if matchLen > 0:
             // Dictionary match found
-            segments.append(string(runes[i : i+matchLen]))
+            segments.append(string(chars[i : i+matchLen]))
             i += matchLen
         else:
             // No match: take single character + combining marks
             clusterEnd = i + 1
-            while clusterEnd < n AND IsThaiCombiningMark(runes[clusterEnd]):
+            while clusterEnd < n AND IsThaiCombiningMark(chars[clusterEnd]):
                 clusterEnd++
-            segments.append(string(runes[i:clusterEnd]))
+            segments.append(string(chars[i:clusterEnd]))
             i = clusterEnd
 
     return segments
@@ -528,8 +529,8 @@ ThaiSegmenter.SegmentToTokens(text) -> []string:
         seg = trim(seg)
         if seg is empty: continue
 
-        runes = toCodepoints(seg)
-        if len(runes) > 0 AND NOT CanStartThaiToken(runes[0]):
+        chars = toChars(seg)
+        if len(chars) > 0 AND NOT CanStartThaiToken(chars[0]):
             // Cannot start a token - merge with previous
             if len(tokens) > 0:
                 tokens[last] += seg
@@ -633,8 +634,8 @@ maiHanAkat = 0x0E31  // ั
 
 ```
 AtomicSegmenter.Segment(text) -> []string:
-    runes = toCodepoints(text)
-    n = len(runes)
+    chars = toChars(text)
+    n = len(chars)
     if n == 0: return null
 
     atoms = []  // pre-allocate ~(n+1)/2 capacity
@@ -644,19 +645,19 @@ AtomicSegmenter.Segment(text) -> []string:
     hadMaiHanAkat = false
 
     for i = 0; i < n; i++:
-        r = runes[i]
+        r = chars[i]
         class = classifyThai(r)
 
         // === Handle non-Thai sequences specially ===
         if class == ccOther:
             // Emit current atom if any
             if i > atomStart:
-                atoms.append(string(runes[atomStart:i]))
+                atoms.append(string(chars[atomStart:i]))
             // Collect entire non-Thai sequence
             start = i
-            while i < n AND classifyThai(runes[i]) == ccOther:
+            while i < n AND classifyThai(chars[i]) == ccOther:
                 i++
-            atoms.append(string(runes[start:i]))
+            atoms.append(string(chars[start:i]))
             i--  // Will be incremented by loop
             state = stStart
             atomStart = i + 1
@@ -685,7 +686,7 @@ AtomicSegmenter.Segment(text) -> []string:
                 // When in stMiddle, receiving ccConsonant, and hadLeading:
                 //   Include this consonant in current atom
                 if state == stMiddle AND class == ccConsonant AND hadLeading:
-                    atoms.append(string(runes[atomStart : i+1]))
+                    atoms.append(string(chars[atomStart : i+1]))
                     atomStart = i + 1
                     state = stStart
                     hadLeading = false
@@ -697,7 +698,7 @@ AtomicSegmenter.Segment(text) -> []string:
                 // When in stMiddle/stTone, receiving ccConsonant, and hadMaiHanAkat:
                 //   Include this consonant in current atom
                 if (state == stMiddle OR state == stTone) AND class == ccConsonant AND hadMaiHanAkat:
-                    atoms.append(string(runes[atomStart : i+1]))
+                    atoms.append(string(chars[atomStart : i+1]))
                     atomStart = i + 1
                     state = stStart
                     hadLeading = false
@@ -705,7 +706,7 @@ AtomicSegmenter.Segment(text) -> []string:
                     continue
 
                 // Normal emit
-                atoms.append(string(runes[atomStart:i]))
+                atoms.append(string(chars[atomStart:i]))
 
             atomStart = i
             hadLeading = (class == ccLeading)
@@ -714,7 +715,7 @@ AtomicSegmenter.Segment(text) -> []string:
         case actEmitSingle:
             // Emit current atom if any
             if i > atomStart:
-                atoms.append(string(runes[atomStart:i]))
+                atoms.append(string(chars[atomStart:i]))
             // Emit single character
             atoms.append(string(r))
             atomStart = i + 1
@@ -736,7 +737,7 @@ AtomicSegmenter.Segment(text) -> []string:
 
     // Emit final atom
     if atomStart < n:
-        atoms.append(string(runes[atomStart:]))
+        atoms.append(string(chars[atomStart:]))
 
     return atoms
 ```
@@ -788,30 +789,30 @@ Used in Step 3 (forward merge) of `segmentWithBacktrack`.
 ```
 needsMergeWithNext(tok) -> bool:
     if tok is empty: return false
-    runes = toCodepoints(tok)
+    chars = toChars(tok)
 
     // 1. Check if entire token is just leading vowel(s)
     allLeading = true
-    for each r in runes:
+    for each r in chars:
         if NOT isThaiLeadingVowel(r):
             allLeading = false
             break
     if allLeading: return true
 
     // 2. Check if ends with a leading vowel
-    if isThaiLeadingVowel(runes[last]):
+    if isThaiLeadingVowel(chars[last]):
         return true
 
     // 3. Check for Mai Han-Akat (ั) without final consonant
-    n = len(runes)
+    n = len(chars)
     for i = 0; i < n; i++:
-        if runes[i] == 0x0E31:  // ั
+        if chars[i] == 0x0E31:  // ั
             hasFollowingConsonant = false
             for j = i + 1; j < n; j++:
-                if isThaiConsonant(runes[j]):
+                if isThaiConsonant(chars[j]):
                     hasFollowingConsonant = true
                     break
-                if NOT isThaiToneMark(runes[j]):
+                if NOT isThaiToneMark(chars[j]):
                     break  // Hit non-tone, non-consonant
             if NOT hasFollowingConsonant:
                 return true
@@ -826,7 +827,7 @@ Returns `true` if a token starts with something that can't begin an atom.
 ```
 needsMergeWithPrev(tok) -> bool:
     if tok is empty: return false
-    first = toCodepoints(tok)[0]
+    first = toChars(tok)[0]
 
     if isThaiMiddleVowel(first) OR isThaiToneMark(first):
         return true
@@ -837,8 +838,8 @@ needsMergeWithPrev(tok) -> bool:
 
 ```
 segmentWithBacktrack(text) -> []string:
-    runes = toCodepoints(text)
-    n = len(runes)
+    chars = toChars(text)
+    n = len(chars)
     if n == 0: return null
 
     // ── Step 1: Dict with coverage-aware backtracking ──
@@ -846,17 +847,17 @@ segmentWithBacktrack(text) -> []string:
     i = 0
 
     while i < n:
-        if isWhitespace(runes[i]):
+        if isWhitespace(chars[i]):
             i++; continue
 
-        if NOT IsThaiChar(runes[i]):
+        if NOT IsThaiChar(chars[i]):
             start = i
-            while i < n AND NOT IsThaiChar(runes[i]) AND NOT isWhitespace(runes[i]):
+            while i < n AND NOT IsThaiChar(chars[i]) AND NOT isWhitespace(chars[i]):
                 i++
-            rawSegments.append(string(runes[start:i]))
+            rawSegments.append(string(chars[start:i]))
             continue
 
-        matches = trie.AllMatches(runes[i:])
+        matches = trie.AllMatches(chars[i:])
 
         chosen = 0
         fallback = 0    // valid boundary but no remainder coverage
@@ -870,19 +871,19 @@ segmentWithBacktrack(text) -> []string:
 
             // Check 1: boundary validity
             // Only middle vowels invalidate — tone marks are absorbed later
-            if isThaiMiddleVowel(runes[end]):
+            if isThaiMiddleVowel(chars[end]):
                 continue
 
             // Skip past combining marks to find the true remainder start
             effectiveEnd = end
-            while effectiveEnd < n AND IsThaiCombiningMark(runes[effectiveEnd]):
+            while effectiveEnd < n AND IsThaiCombiningMark(chars[effectiveEnd]):
                 effectiveEnd++
 
             if effectiveEnd >= n:
                 chosen = mLen; break
 
             // Check 2: remainder coverage
-            remainderMatches = trie.AllMatches(runes[effectiveEnd:])
+            remainderMatches = trie.AllMatches(chars[effectiveEnd:])
             if len(remainderMatches) > 0:
                 chosen = mLen; break          // best: valid + coverage
 
@@ -895,23 +896,23 @@ segmentWithBacktrack(text) -> []string:
         if chosen > 0:
             // Absorb trailing combining marks (tone marks, etc.)
             end = i + chosen
-            while end < n AND IsThaiCombiningMark(runes[end]):
+            while end < n AND IsThaiCombiningMark(chars[end]):
                 end++
-            rawSegments.append(string(runes[i:end]))
+            rawSegments.append(string(chars[i:end]))
             i = end
         else:
             // No dict match — single char + combining marks
             clusterEnd = i + 1
-            while clusterEnd < n AND IsThaiCombiningMark(runes[clusterEnd]):
+            while clusterEnd < n AND IsThaiCombiningMark(chars[clusterEnd]):
                 clusterEnd++
-            rawSegments.append(string(runes[i:clusterEnd]))
+            rawSegments.append(string(chars[i:clusterEnd]))
             i = clusterEnd
 
     // ── Step 2: Orphan merging ──
     tokens = []
     for each seg in rawSegments:
         if seg is empty: continue
-        rs = toCodepoints(seg)
+        rs = toChars(seg)
         if len(rs) > 0 AND (isThaiMiddleVowel(rs[0]) OR isThaiToneMark(rs[0])) AND len(tokens) > 0:
             tokens[last] += seg
             continue
@@ -969,15 +970,15 @@ Where `isLetter`, `isDigit`, `isMark` use Unicode categories:
 ```
 Tokenize(text) -> []Token:
     tokens = []
-    runes = toCodepoints(text)
-    n = len(runes)
+    chars = toChars(text)
+    n = len(chars)
 
-    // Build byte offset map: rune_index -> byte_offset
+    // Build byte offset map: char_index -> byte_offset
     byteOffsets = array[n + 1]
     bytePos = 0
     for i = 0; i < n; i++:
         byteOffsets[i] = bytePos
-        bytePos += utf8ByteLength(runes[i])
+        bytePos += utf8ByteLength(chars[i])
     byteOffsets[n] = bytePos
 
     position = 0
@@ -985,42 +986,42 @@ Tokenize(text) -> []Token:
 
     while i < n:
         // Skip non-word characters
-        if NOT IsWordChar(runes[i]):
+        if NOT IsWordChar(chars[i]):
             i++
             continue
 
-        startRune = i
+        startIdx = i
 
         // === THAI TEXT ===
-        if IsThaiChar(runes[i]):
+        if IsThaiChar(chars[i]):
             // Collect contiguous Thai + Unicode marks
             segmentEnd = i
-            while segmentEnd < n AND (IsThaiChar(runes[segmentEnd]) OR isMark(runes[segmentEnd])):
+            while segmentEnd < n AND (IsThaiChar(chars[segmentEnd]) OR isMark(chars[segmentEnd])):
                 segmentEnd++
 
-            thaiText = string(runes[i:segmentEnd])
+            thaiText = string(chars[i:segmentEnd])
             thaiTokens = this.segmentThai(thaiText)
 
             // Build byte offset map for Thai segment
-            thaiRunes = toCodepoints(thaiText)
-            thaiByteOffsets = array[len(thaiRunes) + 1]
+            thaiChars = toChars(thaiText)
+            thaiByteOffsets = array[len(thaiChars) + 1]
             thaiBytePos = 0
-            for j = 0; j < len(thaiRunes); j++:
+            for j = 0; j < len(thaiChars); j++:
                 thaiByteOffsets[j] = thaiBytePos
-                thaiBytePos += utf8ByteLength(thaiRunes[j])
-            thaiByteOffsets[len(thaiRunes)] = thaiBytePos
+                thaiBytePos += utf8ByteLength(thaiChars[j])
+            thaiByteOffsets[len(thaiChars)] = thaiBytePos
 
-            thaiRunePos = 0
+            thaiCharPos = 0
             for each tok in thaiTokens:
-                tokRunes = toCodepoints(tok)
-                tokLen = len(tokRunes)
+                tokChars = toChars(tok)
+                tokLen = len(tokChars)
 
                 tokenText = tok
                 if this.lowercase:
                     tokenText = toLower(tok)
 
-                startByte = byteOffsets[startRune] + thaiByteOffsets[thaiRunePos]
-                endByte = byteOffsets[startRune] + thaiByteOffsets[thaiRunePos + tokLen]
+                startByte = byteOffsets[startIdx] + thaiByteOffsets[thaiCharPos]
+                endByte = byteOffsets[startIdx] + thaiByteOffsets[thaiCharPos + tokLen]
 
                 tokens.append(Token{
                     Text:     tokenText,
@@ -1029,14 +1030,14 @@ Tokenize(text) -> []Token:
                     Position: position,
                 })
                 position++
-                thaiRunePos += tokLen
+                thaiCharPos += tokLen
 
             i = segmentEnd
 
         // === CJK TEXT ===
-        else if IsCJKLike(runes[i]):
-            while i < n AND IsCJKLike(runes[i]):
-                tokenText = string(runes[i])
+        else if IsCJKLike(chars[i]):
+            while i < n AND IsCJKLike(chars[i]):
+                tokenText = string(chars[i])
                 if this.lowercase:
                     tokenText = toLower(tokenText)
 
@@ -1051,16 +1052,16 @@ Tokenize(text) -> []Token:
 
         // === OTHER TEXT (Latin, etc.) ===
         else:
-            while i < n AND IsWordChar(runes[i]) AND NOT IsThaiChar(runes[i]) AND NOT IsCJKLike(runes[i]):
+            while i < n AND IsWordChar(chars[i]) AND NOT IsThaiChar(chars[i]) AND NOT IsCJKLike(chars[i]):
                 i++
 
-            tokenText = string(runes[startRune:i])
+            tokenText = string(chars[startIdx:i])
             if this.lowercase:
                 tokenText = toLower(tokenText)
 
             tokens.append(Token{
                 Text:     tokenText,
-                Start:    byteOffsets[startRune],
+                Start:    byteOffsets[startIdx],
                 End:      byteOffsets[i],
                 Position: position,
             })
@@ -1097,7 +1098,7 @@ segmentThai(text) -> []string:
         case ModeAtomic:
             return this.atomicSegmenter.SegmentToTokens(text)
         case ModeCombined:
-            return [Combined Mode Algorithm from Section 9.2]
+            return segmentWithBacktrack(text)  // See Section 9
         default (ModeDict):
             return this.thaiSegmenter.SegmentToTokens(text)
 ```
@@ -1193,7 +1194,7 @@ TokenizeParallel(texts) -> [][]Token:
             results[i] = this.Tokenize(text)
         return results
 
-    // Process in parallel (one thread/goroutine per text)
+    // Process in parallel (one thread/task per text)
     for each (i, text) in texts:
         spawn:
             results[i] = this.Tokenize(text)
@@ -1448,3 +1449,421 @@ Use this checklist to verify your implementation is complete:
 - [ ] Combined matches Dict (2 cases)
 - [ ] Default mode (1 case)
 - [ ] Character classification (10+ cases)
+
+---
+
+## 15. Language-Specific Implementation Notes
+
+All implementations MUST produce identical `Text` values in the same order for any
+given input string and mode. The `Start`/`End` byte offsets must refer to positions
+in the **UTF-8 encoded** representation of the input, regardless of the language's
+native string encoding. This section documents the pitfalls and idiomatic patterns
+for each target language.
+
+### 15.1 Cross-Language Consistency Rules
+
+These rules ensure every implementation produces the same output:
+
+1. **String iteration must operate on Unicode codepoints**, not bytes or UTF-16 code
+   units. A Thai character like `ก` (U+0E01) is one codepoint regardless of how the
+   language stores it (1-3 bytes in UTF-8, 1 code unit in UTF-16, etc.).
+
+2. **`toChars(text)` must decode to a codepoint array**. This is the canonical form
+   used by all algorithms. The spec's `chars[i]` always means "the i-th Unicode
+   codepoint", not the i-th byte or the i-th UTF-16 code unit.
+
+3. **`Token.Start` and `Token.End` are UTF-8 byte offsets**. Even in languages where
+   strings are not UTF-8 internally (JavaScript uses UTF-16, Python 3 uses an
+   internal multi-width encoding), the offsets must be computed as if the input were
+   UTF-8 encoded. This ensures offsets are interoperable across languages.
+
+4. **`toLower()` must use Unicode-aware lowercasing** (not ASCII-only). Thai and CJK
+   characters are unaffected by lowercasing; only Latin/Cyrillic/etc. characters change.
+
+5. **`IsWordChar()` must use Unicode categories**, not language-specific `\w` regex
+   shortcuts which vary across implementations.
+
+6. **Dictionary file must be read as UTF-8**. The `words_th.txt` file is UTF-8 encoded.
+   Ensure no BOM handling issues or encoding mismatches.
+
+7. **String comparison is codepoint-by-codepoint**. Do not use locale-sensitive collation.
+   Thai text in the dictionary and input must match exactly by codepoint.
+
+### 15.2 Go
+
+Go strings are UTF-8 byte sequences. The `rune` type is an alias for `int32` and
+represents a Unicode codepoint.
+
+**String/codepoint handling**:
+```go
+// toChars: convert string to codepoint array
+chars := []rune(text)
+
+// string(chars[i:j]) converts back to UTF-8 string
+// len(text) returns byte length, len([]rune(text)) returns codepoint count
+
+// Iterating by codepoint:
+for i, r := range text { /* r is a rune (codepoint), i is byte offset */ }
+```
+
+**Byte offset calculation**:
+```go
+// UTF-8 byte length of a single codepoint:
+utf8ByteLength := len(string(r))  // or use utf8.RuneLen(r)
+```
+
+**Unicode categories** — use the `unicode` standard library:
+```go
+unicode.IsLetter(r)  // Category L
+unicode.IsDigit(r)   // Category Nd
+unicode.IsMark(r)    // Category M
+unicode.IsSpace(r)   // whitespace
+strings.ToLower(s)   // Unicode-aware lowercase
+```
+
+**Dictionary loading** — use `//go:embed` to bundle `words_th.txt`:
+```go
+//go:embed data/words_th.txt
+var dictFS embed.FS
+```
+
+**Trie children** — use `map[rune]*TrieNode` for the children map.
+
+**Parallelism** — use goroutines and channels:
+```go
+done := make(chan struct{})
+for i, text := range texts {
+    go func(idx int, txt string) {
+        results[idx] = t.Tokenize(txt)
+        done <- struct{}{}
+    }(i, text)
+}
+for range texts { <-done }
+```
+
+### 15.3 Python
+
+Python 3 strings are sequences of Unicode codepoints. No explicit decoding is needed
+for codepoint access — `s[i]` is already a codepoint (as a single-character string).
+
+**String/codepoint handling**:
+```python
+# toChars: Python strings are already codepoint sequences
+chars = list(text)     # list of single-char strings
+# or for integer codepoints:
+codes = [ord(c) for c in text]
+
+# len(text) returns codepoint count, NOT byte count
+# For byte length: len(text.encode('utf-8'))
+```
+
+**Byte offset calculation**:
+```python
+def utf8_byte_length(char: str) -> int:
+    return len(char.encode('utf-8'))
+
+# Build offset map:
+byte_offsets = []
+pos = 0
+for ch in text:
+    byte_offsets.append(pos)
+    pos += len(ch.encode('utf-8'))
+byte_offsets.append(pos)
+```
+
+**Unicode categories** — use the `unicodedata` standard library:
+```python
+import unicodedata
+
+def is_letter(c):
+    return unicodedata.category(c).startswith('L')
+
+def is_digit(c):
+    return unicodedata.category(c) == 'Nd'
+
+def is_mark(c):
+    return unicodedata.category(c).startswith('M')
+
+def is_word_char(c):
+    return is_letter(c) or is_digit(c) or is_mark(c) or c == '_'
+
+# Lowercase: str.lower() is Unicode-aware
+text.lower()
+```
+
+**Trie children** — use `dict` keyed by character string or `ord()` integer:
+```python
+class TrieNode:
+    def __init__(self):
+        self.children = {}   # dict[str, TrieNode]
+        self.is_end = False
+```
+
+**Dictionary loading** — use `importlib.resources` or `__file__`-relative path:
+```python
+import importlib.resources
+with importlib.resources.open_text('torus', 'words_th.txt', encoding='utf-8') as f:
+    for line in f:
+        word = line.strip()
+        if word:
+            trie.insert(word)
+```
+
+**Parallelism** — use `concurrent.futures.ThreadPoolExecutor` (the GIL limits true
+parallelism, but the API contract is maintained):
+```python
+from concurrent.futures import ThreadPoolExecutor
+with ThreadPoolExecutor() as pool:
+    results = list(pool.map(tokenizer.tokenize, texts))
+```
+
+**Pitfall — `len()` vs byte length**: Python's `len(s)` returns codepoint count.
+For `Token.Start`/`Token.End` byte offsets, always compute via `.encode('utf-8')`.
+
+### 15.4 PHP
+
+PHP strings are byte sequences (no native Unicode string type). Codepoint-level
+operations require `mb_` functions or manual UTF-8 decoding.
+
+**String/codepoint handling**:
+```php
+// toChars: decode UTF-8 string to codepoint array
+// Option A: mb_str_split (PHP 7.4+)
+$chars = mb_str_split($text, 1, 'UTF-8');
+
+// Option B: preg_split
+$chars = preg_split('//u', $text, -1, PREG_SPLIT_NO_EMPTY);
+
+// Get integer codepoint from character:
+$cp = mb_ord($char, 'UTF-8');
+
+// CRITICAL: strlen() returns BYTE count, mb_strlen() returns codepoint count
+// For this spec, Token.Start/End use byte offsets, so strlen() is correct there
+```
+
+**Byte offset calculation**:
+```php
+// UTF-8 byte length of a single codepoint character:
+$byteLen = strlen($char);  // strlen on a single UTF-8 char gives byte count
+
+// Build offset map:
+$byteOffsets = [];
+$pos = 0;
+$chars = mb_str_split($text, 1, 'UTF-8');
+foreach ($chars as $ch) {
+    $byteOffsets[] = $pos;
+    $pos += strlen($ch);
+}
+$byteOffsets[] = $pos;
+```
+
+**Unicode categories** — PHP lacks a built-in Unicode category function. Use
+`IntlChar` (requires `intl` extension, bundled with most PHP installs):
+```php
+// IntlChar is the ONLY zero-dependency way to check Unicode categories in PHP
+IntlChar::isalpha($cp)                              // Letter (category L)
+IntlChar::isdigit($cp)                              // Digit
+IntlChar::charType($cp) === IntlChar::CHAR_CATEGORY_NON_SPACING_MARK
+    || IntlChar::charType($cp) === IntlChar::CHAR_CATEGORY_COMBINING_SPACING_MARK
+    || IntlChar::charType($cp) === IntlChar::CHAR_CATEGORY_ENCLOSING_MARK  // Mark
+
+// If intl is unavailable, implement IsWordChar using codepoint ranges directly:
+// - Letters: check Thai range (0x0E00-0x0E7F), CJK ranges, Latin ranges, etc.
+// - This is acceptable since the tokenizer only needs specific script detection
+
+// Lowercase:
+mb_strtolower($text, 'UTF-8');
+```
+
+**Trie children** — use associative arrays keyed by character string:
+```php
+class TrieNode {
+    public array $children = [];  // char => TrieNode
+    public bool $isEnd = false;
+}
+```
+
+**Dictionary loading**:
+```php
+$lines = file(__DIR__ . '/data/words_th.txt', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+foreach ($lines as $line) {
+    $word = trim($line);
+    if ($word !== '') {
+        $trie->insert($word);
+    }
+}
+```
+
+**Parallelism** — PHP is typically single-threaded. Implement `TokenizeParallel` as
+sequential processing. If parallel execution is needed, use `pcntl_fork()` or the
+`parallel` extension, but sequential processing produces identical results.
+
+**Pitfall — string indexing**: `$text[$i]` accesses the i-th **byte**, not codepoint.
+Always use `mb_str_split()` or similar to get codepoint arrays. Never use `strlen()`
+for codepoint counting or `$text[$i]` for codepoint access.
+
+**Pitfall — mb_internal_encoding**: Set `mb_internal_encoding('UTF-8')` at startup
+or pass `'UTF-8'` explicitly to all `mb_*` functions.
+
+### 15.5 JavaScript / TypeScript
+
+JavaScript strings are UTF-16 encoded. Characters outside the Basic Multilingual
+Plane (BMP) — including CJK Extension B and above (U+20000+) — are stored as
+**surrogate pairs** (two UTF-16 code units). This affects iteration and length.
+
+**String/codepoint handling**:
+```javascript
+// toChars: decode to codepoint array (handles surrogate pairs)
+const chars = [...text];           // Array of single-codepoint strings
+// or:
+const codes = Array.from(text, c => c.codePointAt(0));  // Array of integer codepoints
+
+// CRITICAL: text.length returns UTF-16 code unit count, NOT codepoint count
+// "𠀀".length === 2 (surrogate pair), but [...("𠀀")].length === 1
+// Always use [...text].length or Array.from(text).length for codepoint count
+```
+
+**Byte offset calculation**:
+```javascript
+// UTF-8 byte length of a codepoint:
+function utf8ByteLength(codePoint) {
+    if (codePoint <= 0x7F) return 1;
+    if (codePoint <= 0x7FF) return 2;
+    if (codePoint <= 0xFFFF) return 3;
+    return 4;
+}
+
+// Or using TextEncoder:
+const encoder = new TextEncoder();
+function utf8ByteLength(char) {
+    return encoder.encode(char).length;
+}
+
+// Build offset map:
+const chars = [...text];
+const byteOffsets = [0];
+let pos = 0;
+for (const ch of chars) {
+    pos += utf8ByteLength(ch.codePointAt(0));
+    byteOffsets.push(pos);
+}
+```
+
+**Unicode categories** — JavaScript has no built-in Unicode category lookup.
+Use Unicode-aware regex with the `u` flag:
+```javascript
+function isLetter(ch)  { return /\p{L}/u.test(ch); }
+function isDigit(ch)   { return /\p{Nd}/u.test(ch); }
+function isMark(ch)    { return /\p{M}/u.test(ch); }
+function isWordChar(ch) {
+    return /[\p{L}\p{Nd}\p{M}_]/u.test(ch);
+}
+
+// Lowercase: String.prototype.toLowerCase() is Unicode-aware
+text.toLowerCase();
+```
+
+**Trie children** — use `Map` for efficient codepoint-keyed lookup:
+```javascript
+class TrieNode {
+    constructor() {
+        this.children = new Map();  // Map<string, TrieNode>
+        this.isEnd = false;
+    }
+}
+```
+
+**Dictionary loading** — bundle as a module or fetch at initialization:
+```javascript
+// Node.js:
+import { readFileSync } from 'fs';
+const words = readFileSync('data/words_th.txt', 'utf-8').split('\n');
+
+// Browser: fetch or import as a string constant
+// Alternatively, embed the dictionary as a JS string literal at build time
+```
+
+**Parallelism** — use `Promise.all` with Web Workers or `worker_threads` (Node.js).
+For simple cases, sequential processing in a single thread is sufficient:
+```javascript
+// Sequential (sufficient for most cases):
+function tokenizeParallel(texts) {
+    return texts.map(text => tokenize(text));
+}
+
+// True parallel (Node.js worker_threads):
+import { Worker } from 'worker_threads';
+```
+
+**Pitfall — `string.length`**: Returns UTF-16 code units, not codepoints. CJK
+Extension B characters (U+20000+) have `.length === 2`. Always spread to array first:
+`[...text].length`.
+
+**Pitfall — `charCodeAt` vs `codePointAt`**: `charCodeAt()` returns UTF-16 code
+units (breaks on surrogate pairs). Always use `codePointAt()` for codepoints.
+
+**Pitfall — regex without `u` flag**: Without the `u` flag, regex operates on UTF-16
+code units. Always use the `u` flag for Unicode-correct matching: `/\p{L}/u`.
+
+**TypeScript-specific**: Define interfaces for type safety:
+```typescript
+interface Token {
+    text: string;
+    start: number;   // UTF-8 byte offset
+    end: number;     // UTF-8 byte offset
+    position: number;
+}
+
+enum Mode { Dict = 0, Atomic = 1, Combined = 2 }
+
+interface TorusTokenizer {
+    tokenize(text: string): Token[];
+    tokenizeToStrings(text: string): string[];
+    normalizeToken(token: string): string;
+    mode(): Mode;
+}
+```
+
+### 15.6 Cross-Language Verification
+
+To verify that all implementations produce identical output, run the following
+**canonical test string** through all four implementations and compare the JSON output:
+
+```
+Input: "Hello นายกฤษฎา 你好 ทรานส์ฟอร์เมชั่น test123"
+Mode:  Combined
+```
+
+**Expected output** (JSON):
+```json
+[
+  {"text": "hello",     "start": 0,  "end": 5,  "position": 0},
+  {"text": "นาย",       "start": 6,  "end": 15, "position": 1},
+  {"text": "กฤษฎา",     "start": 15, "end": 30, "position": 2},
+  {"text": "你",         "start": 31, "end": 34, "position": 3},
+  {"text": "好",         "start": 34, "end": 37, "position": 4},
+  {"text": "ทรานส์",    "start": 38, "end": 56, "position": 5},
+  {"text": "ฟ",         "start": 56, "end": 59, "position": 6},
+  {"text": "อร์",       "start": 59, "end": 68, "position": 7},
+  {"text": "เม",        "start": 68, "end": 74, "position": 8},
+  {"text": "ชั่น",      "start": 74, "end": 86, "position": 9},
+  {"text": "test123",   "start": 87, "end": 94, "position": 10}
+]
+```
+
+Every implementation must produce this exact output. If any field differs, the
+implementation has a bug in codepoint iteration, byte offset calculation, or
+tokenization logic.
+
+### 15.7 Common Pitfalls Summary
+
+| Pitfall | Go | Python | PHP | JS/TS |
+|---------|-------|--------|-----|-------|
+| String length returns bytes, not codepoints | `len(s)` = bytes | `len(s)` = codepoints | `strlen()` = bytes | `.length` = UTF-16 units |
+| Correct codepoint iteration | `for _, r := range s` | `for c in s` | `mb_str_split()` | `for (const c of s)` or `[...s]` |
+| Codepoint to integer | `int(r)` (rune is int32) | `ord(c)` | `mb_ord($c)` | `c.codePointAt(0)` |
+| Integer to codepoint string | `string(r)` | `chr(cp)` | `mb_chr($cp)` | `String.fromCodePoint(cp)` |
+| UTF-8 byte length of char | `utf8.RuneLen(r)` | `len(c.encode('utf-8'))` | `strlen($c)` | manual calc or `TextEncoder` |
+| Unicode-aware lowercase | `strings.ToLower()` | `str.lower()` | `mb_strtolower()` | `.toLowerCase()` |
+| Unicode category check | `unicode.IsLetter()` | `unicodedata.category()` | `IntlChar::charType()` | `/\p{L}/u.test()` |
+| Whitespace check | `unicode.IsSpace()` | `c.isspace()` | `ctype_space()` or regex | `/\s/.test()` |
