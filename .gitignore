@@ -1,2 +1,5 @@
 torus-test
 *.exe
+plugin/tok_filter.so
+plugin/words_th_data.h
+plugin/test_plugin
