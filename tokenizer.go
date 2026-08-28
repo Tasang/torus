@@ -379,7 +379,7 @@ func (t *TorusTokenizer) segmentWithBacktrack(text string) []string {
 		j++
 	}
 
-	return result
+	return t.splitProductiveMorphemes(result)
 }
 
 // Tokenize splits text into tokens with position information.
