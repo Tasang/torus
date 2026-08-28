@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/pixaverse/torus"
+	"github.com/Tasang/torus"
 )
 
 func main() {
