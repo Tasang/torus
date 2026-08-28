@@ -202,6 +202,12 @@ func needsMergeWithPrev(tok string) bool {
 	return false
 }
 
+// maxBacktrackSacrifice bounds how many characters coverage-aware backtracking
+// may give up from the longest boundary-valid dictionary match. Backtracking
+// corrects greedy over-capture, which is a one-character error in practice;
+// beyond that it is destroying a real word to accommodate an unknown neighbour.
+const maxBacktrackSacrifice = 1
+
 // segmentWithBacktrack segments Thai text using dictionary with coverage-aware
 // backtracking. It is the primary segmenter for Combined mode.
 //
@@ -248,7 +254,8 @@ func (t *TorusTokenizer) segmentWithBacktrack(text string) []string {
 		matches := t.thaiSegmenter.trie.AllMatches(runes[i:])
 
 		chosen := 0
-		fallback := 0 // valid boundary but no dict coverage on remainder
+		fallback := 0     // valid boundary but no dict coverage on remainder
+		longestValid := 0 // longest match with a valid boundary, whatever its remainder
 
 		// Try from longest to shortest
 		for j := len(matches) - 1; j >= 0; j-- {
@@ -280,9 +287,25 @@ func (t *TorusTokenizer) segmentWithBacktrack(text string) []string {
 				break
 			}
 
+			// Record the longest boundary-valid match so the sacrifice made by
+			// backtracking can be bounded below.
+			if longestValid == 0 {
+				longestValid = mLen
+			}
+
 			// Check 2: does remainder (after combining marks) start with a dict word?
 			remainderMatches := t.thaiSegmenter.trie.AllMatches(runes[effectiveEnd:])
 			if len(remainderMatches) > 0 {
+				// Guard: backtracking exists to fix greedy over-capture of ONE
+				// leading character (e.g. "นายกฤษฎา": นายก(4) → นาย(3), giving up 1
+				// to gain coverage of "กฤษฎา"). It must not dismantle a long
+				// dictionary word merely because an out-of-dictionary neighbour
+				// follows it — "รัฐบาลเวลลิงตัน" surrendering รัฐบาล(6) for รัฐ(3)
+				// destroys the searchable word and gains nothing, since the
+				// remainder is uncoverable either way.
+				if longestValid-mLen > maxBacktrackSacrifice {
+					break // keep the longer word; fall through to fallback
+				}
 				chosen = mLen // best: valid boundary + remainder coverage
 				break
 			}
