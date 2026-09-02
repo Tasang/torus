@@ -25,7 +25,30 @@ was rewritten from scratch as a lightweight, dependency-free Go library.
 |------|-------------|
 | `ModeDict` (default) | Trie-based longest-match dictionary lookup |
 | `ModeAtomic` | FSA-based splitting into smallest valid Thai orthographic units |
-| `ModeCombined` | Dictionary segmentation with an atomic-validity guarantee (backtracks non-atomic tokens) |
+| `ModeCombined` | Dictionary segmentation with an atomic-validity guarantee (backtracks non-atomic tokens), then splits compounds at productive morphemes |
+
+### Productive-morpheme splitting
+
+As a final pass, `ModeCombined` splits a token into two parts when both parts
+are dictionary words and at least one of them is a *productive morpheme* — one
+of the 298 high-frequency Thai formatives listed in `morphemes.go`. Both parts
+must be at least 3 runes, which stops genuine vocabulary from fragmenting:
+`กรรมการ` splits as `กรรม|การ`, not `กร|รม|การ`.
+
+```go
+tok := torus.New(torus.WithMode(torus.ModeCombined))
+tok.TokenizeToStrings("การเดินทาง")
+// ["การ", "เดิน", "ทาง"]
+```
+
+This favours recall for full-text indexing: `เดินทาง` tokenizes as
+`เดิน|ทาง`, so a search for it still matches text containing
+`การเดินทาง`.
+
+> **Upgrading from 0.0.x:** this changes `ModeCombined` output. Existing
+> full-text indexes must be rebuilt, or indexed terms and query terms will
+> disagree. The C++ Manticore plugin in `plugin/` is a separate
+> reimplementation and does **not** include this pass.
 
 ## Repository layout
 
@@ -34,6 +57,8 @@ was rewritten from scratch as a lightweight, dependency-free Go library.
 | `tokenizer.go` | Core `TorusTokenizer` API — modes, options, `Tokenize`/`TokenizeToStrings`, parallel variants |
 | `thai.go` | Thai dictionary-based segmenter (Trie longest match) |
 | `atomic.go` | FSA-based atomic Thai unit segmenter |
+| `morphemes.go` | Set of 298 high-frequency Thai productive morphemes used to split compounds |
+| `split.go` | Productive-morpheme compound splitting applied at the end of Combined mode |
 | `trie.go` | Trie data structure used for dictionary lookups |
 | `unicode.go` | Character classification helpers (CJK, Hangul, Kana, Bopomofo, word chars) |
 | `data/words_th.txt` | Thai word dictionary used to build the Trie |
