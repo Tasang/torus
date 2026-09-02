@@ -1,6 +1,8 @@
 PLUGIN   = tok_filter.so
 DICT_HDR = words_th_data.h
 DICT_SRC = ../data/words_th.txt
+MORPH_HDR = morphemes_data.h
+MORPH_SRC = ../morphemes.go
 
 .PHONY: all plugin test clean
 
@@ -14,8 +16,17 @@ test_plugin: test_plugin.cpp
 
 plugin: $(PLUGIN)
 
-$(PLUGIN): torus_plugin.cpp $(DICT_HDR)
+$(PLUGIN): torus_plugin.cpp $(DICT_HDR) $(MORPH_HDR)
 	g++ -std=c++17 -O2 -fPIC -shared -o $(PLUGIN) torus_plugin.cpp
+
+# Generated from the Go source so the two implementations cannot drift.
+$(MORPH_HDR): $(MORPH_SRC)
+	@echo '// Generated from $(MORPH_SRC) by make -- do not edit.' > $@
+	@echo 'static const char* const torus_morphemes[] = {' >> $@
+	@sed -n 's/^[[:space:]]*"\([^"]*\)":[[:space:]]*true,.*/\t"\1",/p' $< >> $@
+	@echo '};' >> $@
+	@echo 'static const unsigned int torus_morphemes_len =' >> $@
+	@echo '    sizeof(torus_morphemes) / sizeof(torus_morphemes[0]);' >> $@
 
 $(DICT_HDR): $(DICT_SRC)
 	xxd -i $< \
@@ -24,4 +35,4 @@ $(DICT_HDR): $(DICT_SRC)
 	  > $@
 
 clean:
-	rm -f $(PLUGIN) $(DICT_HDR) test_plugin
+	rm -f $(PLUGIN) $(DICT_HDR) $(MORPH_HDR) test_plugin

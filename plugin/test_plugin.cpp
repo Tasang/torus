@@ -130,6 +130,27 @@ int main() {
     print_tokens(t6);
     assert(!t6.empty());
 
+    // ── Test 7: Combined mode — productive-morpheme splitting (parity with Go)
+    printf("\n[Combined mode] การเดินทาง\n  \u2192 ");
+    auto t7 = tokenize(p, "combined", "\u0e01\u0e32\u0e23\u0e40\u0e14\u0e34\u0e19\u0e17\u0e32\u0e07");
+    print_tokens(t7);
+    assert(contains(t7, "\u0e01\u0e32\u0e23"));      // การ
+    assert(contains(t7, "\u0e40\u0e14\u0e34\u0e19")); // เดิน
+    assert(contains(t7, "\u0e17\u0e32\u0e07"));      // ทาง
+
+    // ── Test 8: minSplitPart guard — กรรมการ must not fragment into กร|รม|การ
+    printf("\n[Combined mode] \u0e01\u0e23\u0e23\u0e21\u0e01\u0e32\u0e23\n  \u2192 ");
+    auto t8 = tokenize(p, "combined", "\u0e01\u0e23\u0e23\u0e21\u0e01\u0e32\u0e23");
+    print_tokens(t8);
+    assert(contains(t8, "\u0e01\u0e23\u0e23\u0e21"));  // กรรม, not กร|รม
+    assert(!contains(t8, "\u0e01\u0e23"));               // กร must NOT appear
+
+    // ── Test 9: backtrack sacrifice bound — รัฐบาล survives an unknown neighbour
+    printf("\n[Combined mode] \u0e23\u0e31\u0e10\u0e1a\u0e32\u0e25\u0e40\u0e27\u0e25\u0e25\u0e34\u0e07\u0e15\u0e31\u0e19\n  \u2192 ");
+    auto t9 = tokenize(p, "combined", "\u0e23\u0e31\u0e10\u0e1a\u0e32\u0e25\u0e40\u0e27\u0e25\u0e25\u0e34\u0e07\u0e15\u0e31\u0e19");
+    print_tokens(t9);
+    assert(contains(t9, "\u0e23\u0e31\u0e10\u0e1a\u0e32\u0e25")); // รัฐบาล intact
+
     printf("\nAll tests passed.\n");
     dlclose(p.dl);
     return 0;
