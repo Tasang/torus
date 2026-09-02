@@ -18,6 +18,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 extern "C" {
@@ -25,6 +26,7 @@ extern "C" {
 }
 
 #include "words_th_data.h"   // defines words_th_txt[] and words_th_txt_len
+#include "morphemes_data.h"  // defines torus_morphemes[] (generated from ../morphemes.go)
 
 // ═══════════════════════════════════════════════════════════════════════════
 // §1  UTF-8 utilities
@@ -194,6 +196,17 @@ struct Trie {
         return best;
     }
 
+    // contains reports whether v[from,to) is exactly a dictionary word.
+    // Mirrors Go Trie.Contains (trie.go).
+    bool contains(const std::vector<uint32_t>& v, int from, int to) const {
+        TrieNode* n = root;
+        for (int i = from; i < to; i++) {
+            n = n->child(v[i]);
+            if (!n) return false;
+        }
+        return n->isEnd;
+    }
+
     std::vector<int> allMatches(const std::vector<uint32_t>& v, int from) const {
         std::vector<int> out;
         TrieNode* n = root;
@@ -223,6 +236,16 @@ static void loadDictionary() {
         while (le > p && (*(le-1) == '\r' || *(le-1) == ' ')) le--;
         if (le > p) g_trie->insert(to_codepoints(p, (int)(le - p)));
         p = nl ? nl + 1 : end;
+    }
+}
+
+static std::unordered_set<std::string>* g_morphemes = nullptr;
+
+// loadMorphemes builds the productive-morpheme set embedded from ../morphemes.go.
+static void loadMorphemes() {
+    g_morphemes = new std::unordered_set<std::string>();
+    for (unsigned int i = 0; i < torus_morphemes_len; i++) {
+        g_morphemes->insert(torus_morphemes[i]);
     }
 }
 
@@ -368,6 +391,43 @@ static bool needsMerge(const std::string& tok) {
     return false;
 }
 
+// maxBacktrackSacrifice bounds how many characters coverage-aware backtracking
+// may give up from the longest boundary-valid dictionary match (Go: tokenizer.go).
+static const int maxBacktrackSacrifice = 1;
+
+// minSplitPart is the shortest part a productive-morpheme split may produce
+// (Go: split.go). Requiring 3 runes on both sides keeps กรรมการ splitting as
+// กรรม|การ rather than กร|รม|การ.
+static const int minSplitPart = 3;
+
+// splitProductiveMorphemes splits tokens at productive morpheme boundaries,
+// mirroring Go splitProductiveMorphemes (split.go).
+static void splitOne(const std::vector<uint32_t>& r, int from, int to, int depth,
+                     std::vector<std::string>& out) {
+    int len = to - from;
+    if (len < 2*minSplitPart || depth > 4) { out.push_back(span(r, from, to)); return; }
+    for (int k = minSplitPart; k <= len - minSplitPart; k++) {
+        int mid = from + k;
+        if (!g_trie->contains(r, from, mid) || !g_trie->contains(r, mid, to)) continue;
+        if (g_morphemes->count(span(r, from, mid)) || g_morphemes->count(span(r, mid, to))) {
+            splitOne(r, from, mid, depth+1, out);
+            splitOne(r, mid, to, depth+1, out);
+            return;
+        }
+    }
+    out.push_back(span(r, from, to));
+}
+
+static std::vector<std::string> splitProductiveMorphemes(const std::vector<std::string>& toks) {
+    std::vector<std::string> out;
+    out.reserve(toks.size() + 8);
+    for (const auto& t : toks) {
+        auto r = to_codepoints(t.c_str(), (int)t.size());
+        splitOne(r, 0, (int)r.size(), 0, out);
+    }
+    return out;
+}
+
 static std::vector<std::string> combinedSegment(const std::vector<uint32_t>& cv) {
     int n = (int)cv.size();
     std::vector<std::string> raw;
@@ -386,6 +446,7 @@ static std::vector<std::string> combinedSegment(const std::vector<uint32_t>& cv)
         }
         auto matches = g_trie->allMatches(cv, i);
         int chosen = 0, fallback = 0;
+        int longestValid = 0;  // longest boundary-valid match, whatever its remainder
         for (int j=(int)matches.size()-1; j>=0; j--) {
             int mlen = matches[j], end = i+mlen;
             if (end >= n) { chosen = mlen; break; }
@@ -393,7 +454,14 @@ static std::vector<std::string> combinedSegment(const std::vector<uint32_t>& cv)
             int eff = end;
             while (eff < n && isCombining(cv[eff])) eff++;
             if (eff >= n) { chosen = mlen; break; }
-            if (!g_trie->allMatches(cv, eff).empty()) { chosen = mlen; break; }
+            if (!longestValid) longestValid = mlen;
+            if (!g_trie->allMatches(cv, eff).empty()) {
+                // Bound the sacrifice: backtracking fixes one-character greedy
+                // over-capture, it must not dismantle a long dictionary word for
+                // an out-of-dictionary neighbour (รัฐบาลเวลลิงตัน keeps รัฐบาล).
+                if (longestValid - mlen > maxBacktrackSacrifice) break;
+                chosen = mlen; break;
+            }
             if (!fallback) fallback = mlen;
         }
         if (!chosen) chosen = fallback;
@@ -433,7 +501,7 @@ static std::vector<std::string> combinedSegment(const std::vector<uint32_t>& cv)
             out.push_back(std::move(toks[j++]));
         }
     }
-    return out;
+    return splitProductiveMorphemes(out);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -471,8 +539,8 @@ static const char* emit(Ctx* ctx, const std::string& tok, int* delta, int posInc
 
 extern "C" {
 
-__attribute__((constructor)) static void plugin_load()   { loadDictionary(); }
-__attribute__((destructor))  static void plugin_unload() { delete g_trie; g_trie = nullptr; }
+__attribute__((constructor)) static void plugin_load()   { loadDictionary(); loadMorphemes(); }
+__attribute__((destructor))  static void plugin_unload() { delete g_trie; g_trie = nullptr; delete g_morphemes; g_morphemes = nullptr; }
 
 int tok_filter_ver() { return SPH_UDF_VERSION; }
 
